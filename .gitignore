@@ -1,0 +1,20 @@
+# Data (too large for git; see data/README.md)
+data/raw/*.csv
+data/raw/*.zip
+
+# Environments
+venv/
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# OS
+.DS_Store
+
+# Trained models (regenerate from notebooks)
+models/
