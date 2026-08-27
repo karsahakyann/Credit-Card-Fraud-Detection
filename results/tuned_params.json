@@ -23,5 +23,19 @@
     "cv_pr_auc": 0.84209436225289,
     "n_iter": 15,
     "cv_folds": 5
+  },
+  "dnn": {
+    "params": {
+      "hidden": 256,
+      "n_layers": 2,
+      "dropout": 0.1260206371941118,
+      "lr": 0.00252126790477792,
+      "batch_size": 512,
+      "focal_alpha": 0.1781376912051071,
+      "focal_gamma": 0.0
+    },
+    "cv_pr_auc": 0.8822957130205654,
+    "n_trials": 20,
+    "validation": "25% stratified holdout of train"
   }
 }
