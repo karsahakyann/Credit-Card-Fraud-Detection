@@ -115,3 +115,37 @@ def test_dotenv_does_not_override_real_environment(tmp_path, monkeypatch):
     import os
     assert os.environ["TELEGRAM_CHAT_ID"] == "from-environment"
     assert os.environ["NEW_KEY"] == "value"
+
+
+def test_composite_calls_every_backend_even_after_one_succeeds(alert):
+    """Regression: any() over a generator short-circuited past Telegram.
+
+    The in-memory inbox always succeeds and is registered first, so a
+    short-circuiting any() meant no later backend was ever invoked and
+    alerts silently stopped reaching the phone while the UI showed success.
+    """
+    calls: list[str] = []
+
+    class Recorder:
+        def __init__(self, name, result):
+            self.name, self.result = name, result
+
+        def send(self, a):
+            calls.append(self.name)
+            return self.result
+
+    c = CompositeNotifier(Recorder("first", True), Recorder("second", True))
+    assert c.send(alert) is True
+    assert calls == ["first", "second"], "every backend must be invoked"
+
+
+def test_composite_reports_per_backend_outcome(alert):
+    class Dead:
+        name = "dead"
+        def send(self, a):  # noqa: D102
+            return False
+
+    inbox = InMemoryNotifier()
+    c = CompositeNotifier(inbox, Dead())
+    c.send(alert)
+    assert c.last_results == {"inbox": True, "dead": False}

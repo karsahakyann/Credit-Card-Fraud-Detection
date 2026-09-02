@@ -44,6 +44,7 @@
   .alert .why{color:var(--dim);font-size:11.5px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}
   .pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
   .on{color:var(--ok);border-color:#1e4b32}
+  .bad{color:var(--bad);border-color:#4b1e28}
   .off{color:var(--dim)}
   progress{width:100%;height:7px}
 </style>
@@ -111,9 +112,17 @@ async function health(){
     : "model not loaded — run scripts/train_final_model.py";
   $("pill-proto").textContent = h.protocol;
   const tg = h.notifiers && h.notifiers.telegram;
+  const err = h.notifier_errors && h.notifier_errors.telegram;
+  const sent = h.last_delivery && h.last_delivery.telegram;
   const p = $("pill-telegram");
-  p.textContent = "telegram: " + (tg ? "on" : "off");
-  p.className = "pill " + (tg ? "on" : "off");
+  // "configured" and "delivering" are different states; show which.
+  let label = "off", cls = "off";
+  if (tg && err) { label = "error"; cls = "bad"; }
+  else if (tg && sent) { label = "sending"; cls = "on"; }
+  else if (tg) { label = "on"; cls = "on"; }
+  p.textContent = "telegram: " + label;
+  p.className = "pill " + cls;
+  p.title = err ? String(err) : "";
 }
 
 function renderStats(s){

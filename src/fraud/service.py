@@ -181,6 +181,11 @@ def health() -> dict:
         "model": svc.bundle["model_name"] if svc.ready else None,
         "threshold": svc.threshold if svc.ready else None,
         "notifiers": svc.notifier.status(),
+        # Configured is not the same as working: surface the last delivery
+        # outcome and any error so a silently failing backend is visible
+        # rather than hiding behind a green pill.
+        "last_delivery": svc.notifier.last_results or None,
+        "notifier_errors": svc.notifier.errors() or None,
         "replay_size": len(svc.replay["y"]) if svc.ready else 0,
     }
 

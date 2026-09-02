@@ -159,15 +159,33 @@ class CompositeNotifier:
 
     def __init__(self, *backends: Notifier):
         self.backends = list(backends)
+        self.last_results: dict[str, bool] = {}
 
     def send(self, alert: Alert) -> bool:
-        return any(b.send(alert) for b in list(self.backends))
+        """Deliver to every backend, then report whether any succeeded.
+
+        The results are materialised into a list *before* any() sees them.
+        Passing a generator here would let any() short-circuit on the first
+        success, and since the in-memory inbox always succeeds and is listed
+        first, every later backend -- Telegram included -- would be silently
+        skipped. That bug shipped once; the ordering test below now pins it.
+        """
+        results = [b.send(alert) for b in list(self.backends)]
+        self.last_results = dict(zip([b.name for b in self.backends], results))
+        return any(results)
 
     def status(self) -> dict[str, bool]:
         out: dict[str, bool] = {}
         for b in self.backends:
             out[b.name] = bool(getattr(b, "enabled", True))
         return out
+
+    def errors(self) -> dict[str, str]:
+        """Last error per backend, for surfacing silent delivery failures."""
+        return {
+            b.name: err for b in self.backends
+            if (err := getattr(b, "last_error", None))
+        }
 
 
 def load_dotenv(path: str = ".env") -> int:
