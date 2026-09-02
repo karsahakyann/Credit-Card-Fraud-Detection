@@ -1,0 +1,7 @@
+case,protocol,feature,value,shap,pushes
+false_alarm,chronological,V14,-3.78605774051617,4.3163466,toward fraud
+false_alarm,chronological,V10,-2.56647143201517,2.0213158,toward fraud
+false_alarm,chronological,V4,2.00892192389757,1.0078751,toward fraud
+false_alarm,chronological,V12,-2.65161775878709,0.58399266,toward fraud
+false_alarm,chronological,V28,0.475416937627891,-0.37020692,toward legit
+false_alarm,chronological,V8,-0.0987833374491391,0.3315925,toward fraud

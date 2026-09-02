@@ -1,0 +1,7 @@
+case,protocol,feature,value,shap,pushes
+missed_fraud,stratified,V14,0.984993219111346,-1.5196217,toward legit
+missed_fraud,stratified,V12,0.979674835308759,-0.9774571,toward legit
+missed_fraud,stratified,V4,0.163310074791927,-0.74361616,toward legit
+missed_fraud,stratified,V26,-1.12588109590433,0.55742675,toward fraud
+missed_fraud,stratified,V10,-1.13445381068391,-0.37879074,toward legit
+missed_fraud,stratified,Amount,1096.99,0.31632775,toward fraud
