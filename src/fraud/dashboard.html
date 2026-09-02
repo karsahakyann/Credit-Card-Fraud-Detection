@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fraud Detection — Live Demo</title>
+<style>
+  :root{
+    --bg:#0f1420; --panel:#182031; --line:#26314a; --ink:#e8edf7; --dim:#93a1bd;
+    --ok:#4ade80; --bad:#f87171; --warn:#fbbf24; --accent:#60a5fa;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:14px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  header{padding:16px 22px;border-bottom:1px solid var(--line);display:flex;
+         align-items:center;gap:16px;flex-wrap:wrap}
+  h1{font-size:17px;margin:0;font-weight:650;letter-spacing:.2px}
+  .sub{color:var(--dim);font-size:12px}
+  .wrap{display:grid;grid-template-columns:1.25fr .85fr;gap:16px;padding:16px 22px}
+  @media(max-width:900px){.wrap{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
+  .card h2{font-size:12px;text-transform:uppercase;letter-spacing:.9px;
+           color:var(--dim);margin:0 0 12px;font-weight:600}
+  .tiles{display:grid;grid-template-columns:repeat(4,1fr);gap:10px}
+  @media(max-width:620px){.tiles{grid-template-columns:repeat(2,1fr)}}
+  .tile{background:#131a29;border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+  .tile .v{font-size:21px;font-weight:680;font-variant-numeric:tabular-nums}
+  .tile .k{font-size:11px;color:var(--dim);margin-top:2px}
+  button{background:var(--accent);color:#08111f;border:0;border-radius:7px;
+         padding:8px 14px;font-weight:650;cursor:pointer;font-size:13px}
+  button.ghost{background:#22304a;color:var(--ink)}
+  button:disabled{opacity:.45;cursor:not-allowed}
+  .row{display:flex;gap:9px;align-items:center;flex-wrap:wrap}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  th,td{text-align:left;padding:6px 8px;border-bottom:1px solid var(--line);font-size:12.5px}
+  th{color:var(--dim);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+  .flag{color:var(--bad);font-weight:650}
+  .clear{color:var(--dim)}
+  .hit{color:var(--ok);font-weight:650}
+  .miss{color:var(--warn);font-weight:650}
+  .feed{max-height:330px;overflow:auto}
+  .alert{border:1px solid #3d2230;background:#1d1420;border-radius:8px;
+         padding:9px 11px;margin-bottom:8px}
+  .alert .top{display:flex;justify-content:space-between;gap:8px;font-weight:650}
+  .alert .why{color:var(--dim);font-size:11.5px;margin-top:5px;font-family:ui-monospace,Menlo,monospace}
+  .pill{font-size:11px;padding:2px 8px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+  .on{color:var(--ok);border-color:#1e4b32}
+  .off{color:var(--dim)}
+  progress{width:100%;height:7px}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fraud Detection — Live Demo</h1>
+  <span class="sub" id="modelinfo">loading…</span>
+  <span style="flex:1"></span>
+  <span class="pill" id="pill-telegram">telegram: ?</span>
+  <span class="pill" id="pill-proto">—</span>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="card" style="margin-bottom:16px">
+      <h2>Replay of held-out transactions</h2>
+      <div class="row" style="margin-bottom:12px">
+        <button id="start">▶ Start</button>
+        <button id="pause" class="ghost" disabled>⏸ Pause</button>
+        <button id="step" class="ghost">Step ×25</button>
+        <button id="skip" class="ghost">⏭ Next fraud</button>
+        <button id="reset" class="ghost">Reset</button>
+        <span class="sub" id="speed-label" style="margin-left:6px">speed 25/tick</span>
+      </div>
+      <progress id="prog" value="0" max="100"></progress>
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><div class="v" id="t-proc">0</div><div class="k">processed</div></div>
+        <div class="tile"><div class="v hit" id="t-caught">0</div><div class="k">fraud caught</div></div>
+        <div class="tile"><div class="v miss" id="t-missed">0</div><div class="k">fraud missed</div></div>
+        <div class="tile"><div class="v" id="t-fp">0</div><div class="k">false alarms</div></div>
+      </div>
+      <div class="tiles" style="margin-top:10px">
+        <div class="tile"><div class="v" id="t-prec">—</div><div class="k">precision</div></div>
+        <div class="tile"><div class="v" id="t-rec">—</div><div class="k">recall</div></div>
+        <div class="tile"><div class="v" id="t-lost">€0</div><div class="k">money lost</div></div>
+        <div class="tile"><div class="v" id="t-cost">€0</div><div class="k">total cost</div></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Transaction stream</h2>
+      <table>
+        <thead><tr><th>#</th><th>amount</th><th>p(fraud)</th><th>decision</th><th>truth</th></tr></thead>
+        <tbody id="stream"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Fraud alerts</h2>
+    <div class="feed" id="alerts"><div class="sub">No alerts yet — start the replay.</div></div>
+  </div>
+</div>
+
+<script>
+let timer = null, batch = 25;
+const $ = id => document.getElementById(id);
+const eur = v => "€" + (v ?? 0).toLocaleString(undefined, {maximumFractionDigits:0});
+
+async function health(){
+  const h = await (await fetch("/health")).json();
+  $("modelinfo").textContent = h.ready
+    ? `${h.model} · threshold ${h.threshold.toFixed(2)} · ${h.replay_size.toLocaleString()} held-out transactions`
+    : "model not loaded — run scripts/train_final_model.py";
+  $("pill-proto").textContent = h.protocol;
+  const tg = h.notifiers && h.notifiers.telegram;
+  const p = $("pill-telegram");
+  p.textContent = "telegram: " + (tg ? "on" : "off");
+  p.className = "pill " + (tg ? "on" : "off");
+}
+
+function renderStats(s){
+  $("t-proc").textContent = s.processed.toLocaleString();
+  $("t-caught").textContent = s.tp;
+  $("t-missed").textContent = s.fn;
+  $("t-fp").textContent = s.fp;
+  $("t-prec").textContent = s.precision == null ? "—" : s.precision.toFixed(3);
+  $("t-rec").textContent = s.recall == null ? "—" : s.recall.toFixed(3);
+  $("t-lost").textContent = eur(s.money_lost);
+  $("t-cost").textContent = eur(s.total_cost);
+  const total = s.processed + s.remaining;
+  $("prog").value = total ? (100*s.processed/total) : 0;
+}
+
+function renderStream(rows){
+  const tb = $("stream");
+  for(const r of rows.slice().reverse()){
+    const tr = document.createElement("tr");
+    const truth = r.actual_fraud ? '<span class="flag">fraud</span>' : '<span class="clear">legit</span>';
+    const dec = r.flagged ? '<span class="flag">FLAG</span>' : '<span class="clear">pass</span>';
+    tr.innerHTML = `<td>${r.transaction_id}</td><td>€${r.amount.toFixed(2)}</td>
+      <td>${r.probability.toFixed(3)}</td><td>${dec}</td><td>${truth}</td>`;
+    tb.prepend(tr);
+  }
+  while(tb.children.length > 40) tb.removeChild(tb.lastChild);
+}
+
+async function renderAlerts(){
+  const a = (await (await fetch("/alerts?limit=12")).json()).alerts;
+  const box = $("alerts");
+  if(!a.length){ box.innerHTML = '<div class="sub">No alerts yet — start the replay.</div>'; return; }
+  box.innerHTML = a.map(x => `
+    <div class="alert">
+      <div class="top"><span>€${x.amount.toFixed(2)}</span><span>p=${x.probability.toFixed(3)}</span></div>
+      <div class="why">${x.reasons.map(r => `${r[0]} ${r[1]>0?"+":""}${r[1].toFixed(2)}`).join("  ·  ") || "—"}</div>
+    </div>`).join("");
+}
+
+async function tick(){
+  const r = await (await fetch(`/replay/next?n=${batch}`)).json();
+  renderStream(r.scored); renderStats(r.stats); renderAlerts();
+  if(r.stats.remaining === 0) pause();
+}
+function start(){ if(timer) return; $("start").disabled=true; $("pause").disabled=false;
+                  timer=setInterval(tick, 700); }
+function pause(){ clearInterval(timer); timer=null; $("start").disabled=false; $("pause").disabled=true; }
+
+$("start").onclick = start;
+$("pause").onclick = pause;
+$("step").onclick = tick;
+$("skip").onclick = async () => {
+  $("skip").disabled = true;
+  const r = await (await fetch("/replay/skip_to_fraud")).json();
+  renderStream(r.scored); renderStats(r.stats); renderAlerts();
+  $("speed-label").textContent = `skipped ${r.skipped.toLocaleString()} legitimate`;
+  $("skip").disabled = false;
+};
+$("reset").onclick = async () => { pause(); await fetch("/replay/reset",{method:"POST"});
+  $("stream").innerHTML=""; renderStats(await (await fetch("/stats")).json()); renderAlerts(); };
+
+health();
+fetch("/stats").then(r=>r.json()).then(renderStats);
+</script>
+</body>
+</html>
