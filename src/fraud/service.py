@@ -243,18 +243,37 @@ def replay_next(n: int = 1, notify: bool = True) -> dict:
 
 
 @app.get("/replay/skip_to_fraud")
-def replay_skip_to_fraud(max_scan: int = 6000, notify: bool = True) -> dict:
-    """Fast-forward to the next genuine fraud, scoring everything on the way.
+def replay_skip_to_fraud(max_scan: int = 6000, notify: bool = True,
+                         stop_on: str = "alert") -> dict:
+    """Fast-forward past uneventful traffic, scoring everything on the way.
 
     Fraud is 0.13% of this stream: the first one sits about 1,900
     transactions in, and the widest gap is over 4,000. A live audience
     should not watch a minute of blank screen waiting for that.
 
-    This is a presentation aid, not a shortcut. Every skipped transaction is
-    still scored and still counted in the running tallies, so precision,
-    recall and cost stay exactly what a full replay would produce -- only
-    the per-row rendering is suppressed.
+    Two stopping rules, and the difference matters when presenting:
+
+    ``stop_on="alert"`` (default)
+        Stop when *the model* flags a transaction. Uses no ground-truth
+        labels whatsoever, so it is exactly what a production system would
+        do while watching a live feed. Defensible without caveat.
+    ``stop_on="fraud"``
+        Stop at the next transaction that is truly fraudulent, whether the
+        model caught it or not. This reads the label, so it is a
+        presentation convenience rather than a live-system behaviour -- but
+        it is the only way to *show* a miss, which is worth demonstrating
+        honestly rather than hiding.
+
+    In neither mode does the model see a label: score_row receives features
+    only. The label, when used at all, decides where the display pauses,
+    never what the model predicts.
+
+    Every skipped transaction is still scored and still counted, so
+    precision, recall and cost are exactly what a full replay produces.
+    Only the per-row rendering is suppressed.
     """
+    if stop_on not in ("alert", "fraud"):
+        raise HTTPException(422, "stop_on must be 'alert' or 'fraud'")
     if not svc.ready:
         raise HTTPException(503, "Model not loaded")
     X, y, amounts = svc.replay["X"], svc.replay["y"], svc.replay["amounts"]
@@ -280,16 +299,20 @@ def replay_skip_to_fraud(max_scan: int = 6000, notify: bool = True) -> dict:
             svc.state.processed += 1
             svc.state.cursor += 1
 
-            if actual == 1 or res.flagged:
+            interesting = res.flagged or (stop_on == "fraud" and actual == 1)
+            if interesting:
                 shown.append({"transaction_id": int(i),
                               "probability": res.probability,
                               "amount": res.amount, "flagged": res.flagged,
                               "actual_fraud": actual == 1})
-                if actual == 1:
+                should_stop = (res.flagged if stop_on == "alert"
+                               else actual == 1)
+                if should_stop:
                     break
             else:
                 skipped += 1
-    return {"scored": shown, "skipped": skipped, "stats": stats()}
+    return {"scored": shown, "skipped": skipped,
+            "stop_on": stop_on, "stats": stats()}
 
 
 @app.get("/stats")

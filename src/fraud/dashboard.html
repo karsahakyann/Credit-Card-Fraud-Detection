@@ -66,7 +66,8 @@
         <button id="start">▶ Start</button>
         <button id="pause" class="ghost" disabled>⏸ Pause</button>
         <button id="step" class="ghost">Step ×25</button>
-        <button id="skip" class="ghost">⏭ Next fraud</button>
+        <button id="skip" class="ghost">⏭ Next alert</button>
+        <button id="skipfraud" class="ghost">⏭ Next true fraud</button>
         <button id="reset" class="ghost">Reset</button>
         <span class="sub" id="speed-label" style="margin-left:6px">speed 25/tick</span>
       </div>
@@ -174,13 +175,16 @@ function pause(){ clearInterval(timer); timer=null; $("start").disabled=false; $
 $("start").onclick = start;
 $("pause").onclick = pause;
 $("step").onclick = tick;
-$("skip").onclick = async () => {
-  $("skip").disabled = true;
-  const r = await (await fetch("/replay/skip_to_fraud")).json();
+async function skipTo(mode, btn){
+  btn.disabled = true;
+  const r = await (await fetch(`/replay/skip_to_fraud?stop_on=${mode}`)).json();
   renderStream(r.scored); renderStats(r.stats); renderAlerts();
-  $("speed-label").textContent = `skipped ${r.skipped.toLocaleString()} legitimate`;
-  $("skip").disabled = false;
-};
+  $("speed-label").textContent =
+    `skipped ${r.skipped.toLocaleString()} · stopped on ${mode === "alert" ? "model alert" : "true fraud"}`;
+  btn.disabled = false;
+}
+$("skip").onclick = () => skipTo("alert", $("skip"));
+$("skipfraud").onclick = () => skipTo("fraud", $("skipfraud"));
 $("reset").onclick = async () => { pause(); await fetch("/replay/reset",{method:"POST"});
   $("stream").innerHTML=""; renderStats(await (await fetch("/stats")).json()); renderAlerts(); };
 

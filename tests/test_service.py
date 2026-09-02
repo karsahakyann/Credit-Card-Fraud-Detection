@@ -65,9 +65,14 @@ def test_reset_clears_state(client):
 
 
 def test_skip_to_fraud_lands_on_a_real_fraud(client):
-    """The presentation aid must not distort the tallies it fast-forwards."""
+    """The presentation aid must not distort the tallies it fast-forwards.
+
+    Uses stop_on=fraud explicitly: the default is the label-free "alert"
+    mode, which stops at the model's first flag and may legitimately land
+    on a false positive.
+    """
     client.post("/replay/reset")
-    r = client.get("/replay/skip_to_fraud").json()
+    r = client.get("/replay/skip_to_fraud?stop_on=fraud").json()
     assert r["scored"], "should surface at least one transaction"
     assert r["scored"][-1]["actual_fraud"] is True
     s = r["stats"]
@@ -87,3 +92,32 @@ def test_flagged_fraud_produces_an_explained_alert(client):
 def test_dashboard_serves(client):
     r = client.get("/")
     assert r.status_code == 200 and "Fraud Detection" in r.text
+
+
+def test_skip_on_alert_uses_no_labels(client):
+    """Default mode stops when the MODEL flags, never on ground truth."""
+    client.post("/replay/reset")
+    r = client.get("/replay/skip_to_fraud?stop_on=alert&notify=false").json()
+    assert r["stop_on"] == "alert"
+    assert r["scored"][-1]["flagged"] is True, "must stop on a model alert"
+
+
+def test_skip_on_fraud_stops_at_truth(client):
+    client.post("/replay/reset")
+    r = client.get("/replay/skip_to_fraud?stop_on=fraud&notify=false").json()
+    assert r["stop_on"] == "fraud"
+    assert r["scored"][-1]["actual_fraud"] is True
+
+
+def test_skip_rejects_unknown_mode(client):
+    assert client.get("/replay/skip_to_fraud?stop_on=magic").status_code == 422
+
+
+def test_both_skip_modes_keep_tallies_exact(client):
+    """Whichever mode is used, every scanned row is counted exactly once."""
+    for mode in ("alert", "fraud"):
+        client.post("/replay/reset")
+        r = client.get(f"/replay/skip_to_fraud?stop_on={mode}&notify=false").json()
+        s = r["stats"]
+        assert s["processed"] == s["tp"] + s["fp"] + s["fn"] + s["tn"]
+        assert s["processed"] == r["skipped"] + len(r["scored"])
