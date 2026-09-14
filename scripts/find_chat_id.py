@@ -6,8 +6,9 @@ Telegram's getUpdates returns the chat it came from, including the numeric
 id the API needs.
 
 Usage:
-    ./venv/bin/python scripts/find_chat_id.py            # show the id
-    ./venv/bin/python scripts/find_chat_id.py --write    # also save to .env
+    ./venv/bin/python scripts/find_chat_id.py                  # show the id
+    ./venv/bin/python scripts/find_chat_id.py --write          # save to .env
+    ./venv/bin/python scripts/find_chat_id.py --wait --write   # wait for your message
 """
 
 from __future__ import annotations
@@ -71,9 +72,24 @@ def main() -> int:
     username = me["result"].get("username", "?")
     print(f"Bot authenticated: @{username}\n")
 
-    updates = requests.get(
-        f"https://api.telegram.org/bot{token}/getUpdates", timeout=10).json()
-    results = updates.get("result", []) if updates.get("ok") else []
+    wait = "--wait" in sys.argv
+    if wait:
+        print(f"Waiting for a message. Open https://t.me/{username} and press "
+              f"Start.\nListening for up to 90 seconds", end="", flush=True)
+
+    import time
+    deadline = time.time() + (90 if wait else 0)
+    results = []
+    while True:
+        updates = requests.get(
+            f"https://api.telegram.org/bot{token}/getUpdates", timeout=15).json()
+        results = updates.get("result", []) if updates.get("ok") else []
+        if results or time.time() >= deadline:
+            break
+        print(".", end="", flush=True)
+        time.sleep(3)
+    if wait:
+        print()
 
     chats: dict[str, str] = {}
     for item in results:
@@ -89,7 +105,7 @@ def main() -> int:
         print("A bot cannot start a conversation, so you must message it first:")
         print(f"  1. Open  https://t.me/{username}")
         print("  2. Press Start, or send it any message such as 'hello'")
-        print("  3. Run this script again\n")
+        print("  3. Run this script again, or use --wait so it listens for you\n")
         print("Note: Telegram only keeps recent updates. If you messaged the bot")
         print("a long time ago, or another process already consumed the update,")
         print("simply send it a fresh message and retry.")

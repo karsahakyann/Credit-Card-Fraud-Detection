@@ -140,6 +140,17 @@ class TelegramNotifier:
                 json={"chat_id": self.chat_id, "text": alert.as_text()},
                 timeout=self.timeout,
             )
+            if response.status_code == 429:
+                # Telegram throttles per chat. A replay that hits a cluster
+                # of frauds can trip this, so name it rather than reporting a
+                # generic HTTP error that looks like a broken integration.
+                retry = ""
+                try:
+                    retry = f", retry after {response.json()['parameters']['retry_after']}s"
+                except Exception:                             # noqa: BLE001
+                    pass
+                self.last_error = f"rate limited by Telegram{retry}"
+                return False
             if response.status_code != 200:
                 # Never log response bodies: Telegram echoes the bot token
                 # in some error payloads.
@@ -150,6 +161,82 @@ class TelegramNotifier:
         except Exception as exc:                      # noqa: BLE001
             self.last_error = f"{type(exc).__name__}: {exc}"
             return False
+
+
+class BackgroundNotifier:
+    """Deliver via a worker thread, so a slow backend never stalls scoring.
+
+    A Telegram round trip takes roughly a third of a second. The replay calls
+    send() from inside the request handler while holding the state lock, so a
+    synchronous post adds that delay to every batch containing an alert and
+    makes a live demo visibly stutter.
+
+    Wrapping the backend moves the wait off the request path. send() enqueues
+    and returns immediately; a daemon thread drains the queue, spacing sends
+    to respect Telegram's per-chat throttle. A full queue drops the alert
+    rather than blocking -- for a demo, a late notification is worse than a
+    missing one, and the dashboard inbox has the full record either way.
+    """
+
+    def __init__(self, backend: "Notifier", min_interval: float = 1.05,
+                 max_queue: int = 200):
+        import queue as _queue
+        import threading as _threading
+
+        self.backend = backend
+        self.name = backend.name
+        self.min_interval = min_interval
+        self._queue: _queue.Queue = _queue.Queue(maxsize=max_queue)
+        self._dropped = 0
+        self._sent = 0
+        self._thread = _threading.Thread(
+            target=self._worker, name=f"notifier-{self.name}", daemon=True)
+        self._thread.start()
+
+    @property
+    def enabled(self) -> bool:
+        return bool(getattr(self.backend, "enabled", True))
+
+    @property
+    def last_error(self) -> str | None:
+        err = getattr(self.backend, "last_error", None)
+        if self._dropped:
+            return f"{self._dropped} alert(s) dropped (queue full)" + (
+                f"; {err}" if err else "")
+        return err
+
+    def _worker(self) -> None:
+        import time
+        while True:
+            alert = self._queue.get()
+            try:
+                if self.backend.send(alert):
+                    self._sent += 1
+            except Exception:                                 # noqa: BLE001
+                pass                                          # never die
+            finally:
+                self._queue.task_done()
+            time.sleep(self.min_interval)
+
+    def send(self, alert: Alert) -> bool:
+        """Enqueue. True means accepted for delivery, not yet delivered."""
+        import queue as _queue
+        if not self.enabled:
+            return False
+        try:
+            self._queue.put_nowait(alert)
+            return True
+        except _queue.Full:
+            self._dropped += 1
+            return False
+
+    def flush(self, timeout: float = 10.0) -> bool:
+        """Block until the queue drains. Used by tests and shutdown."""
+        import time
+        deadline = time.time() + timeout
+        while not self._queue.empty() and time.time() < deadline:
+            time.sleep(0.05)
+        return self._queue.empty()
 
 
 class CompositeNotifier:
@@ -212,7 +299,15 @@ def load_dotenv(path: str = ".env") -> int:
     return loaded
 
 
-def build_default_notifier() -> CompositeNotifier:
-    """Dashboard inbox always; Telegram too when credentials are present."""
+def build_default_notifier(background: bool = True) -> CompositeNotifier:
+    """Dashboard inbox always; Telegram too when credentials are present.
+
+    Telegram is wrapped for background delivery by default so its network
+    latency never reaches the scoring path. Tests pass background=False to
+    keep delivery synchronous and assertions simple.
+    """
     load_dotenv()
-    return CompositeNotifier(InMemoryNotifier(), TelegramNotifier())
+    telegram: Notifier = TelegramNotifier()
+    if background:
+        telegram = BackgroundNotifier(telegram)
+    return CompositeNotifier(InMemoryNotifier(), telegram)

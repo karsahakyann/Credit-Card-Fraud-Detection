@@ -149,3 +149,99 @@ def test_composite_reports_per_backend_outcome(alert):
     c = CompositeNotifier(inbox, Dead())
     c.send(alert)
     assert c.last_results == {"inbox": True, "dead": False}
+
+
+def test_background_notifier_returns_immediately(alert):
+    """Enqueueing must not wait on the network."""
+    import time
+    from fraud.alerts import BackgroundNotifier
+
+    class Slow:
+        name = "slow"
+        enabled = True
+        last_error = None
+        def send(self, a):  # noqa: D102
+            time.sleep(0.5)
+            return True
+
+    bg = BackgroundNotifier(Slow(), min_interval=0)
+    t0 = time.time()
+    assert bg.send(alert) is True
+    assert time.time() - t0 < 0.1, "send() must not block on the backend"
+    assert bg.flush(timeout=5)
+
+
+def test_background_notifier_actually_delivers(alert):
+    from fraud.alerts import BackgroundNotifier
+    delivered = []
+
+    class Recorder:
+        name = "rec"
+        enabled = True
+        last_error = None
+        def send(self, a):  # noqa: D102
+            delivered.append(a.transaction_id)
+            return True
+
+    bg = BackgroundNotifier(Recorder(), min_interval=0)
+    for i in range(3):
+        bg.send(Alert(i, 1.0, 0.9, 0.11, "XGBoost"))
+    assert bg.flush(timeout=5)
+    assert sorted(delivered) == [0, 1, 2]
+
+
+def test_background_notifier_survives_a_throwing_backend(alert):
+    """A backend that raises must not kill the worker thread."""
+    from fraud.alerts import BackgroundNotifier
+    calls = []
+
+    class Exploding:
+        name = "boom"
+        enabled = True
+        last_error = None
+        def send(self, a):  # noqa: D102
+            calls.append(a.transaction_id)
+            raise RuntimeError("network gone")
+
+    bg = BackgroundNotifier(Exploding(), min_interval=0)
+    bg.send(Alert(1, 1.0, 0.9, 0.11, "X"))
+    bg.send(Alert(2, 1.0, 0.9, 0.11, "X"))
+    assert bg.flush(timeout=5)
+    assert calls == [1, 2], "worker must keep draining after an exception"
+
+
+def test_background_notifier_drops_rather_than_blocks(alert):
+    import time
+    from fraud.alerts import BackgroundNotifier
+
+    class Slow:
+        name = "slow"
+        enabled = True
+        last_error = None
+        def send(self, a):  # noqa: D102
+            time.sleep(0.2)
+            return True
+
+    bg = BackgroundNotifier(Slow(), min_interval=0, max_queue=2)
+    results = [bg.send(Alert(i, 1.0, 0.9, 0.11, "X")) for i in range(12)]
+    assert results[0] is True
+    assert any(r is False for r in results), "a full queue must drop, not block"
+    assert "dropped" in (bg.last_error or "")
+
+
+def test_telegram_names_rate_limiting(monkeypatch, alert):
+    """429 must be reported as throttling, not a generic failure."""
+    import sys
+    class Resp:
+        status_code = 429
+        @staticmethod
+        def json():
+            return {"parameters": {"retry_after": 7}}
+    class Fake:
+        @staticmethod
+        def post(*a, **k):
+            return Resp()
+    monkeypatch.setitem(sys.modules, "requests", Fake)
+    t = TelegramNotifier(token="x", chat_id="y")
+    assert t.send(alert) is False
+    assert "rate limited" in t.last_error and "7s" in t.last_error

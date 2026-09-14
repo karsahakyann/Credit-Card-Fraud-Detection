@@ -18,3 +18,4 @@ __pycache__/
 
 # Trained models (regenerate from notebooks)
 models/
+PROJECT_STATUS.txt

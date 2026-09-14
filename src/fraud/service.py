@@ -24,6 +24,7 @@ Run:
 from __future__ import annotations
 
 import threading
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -119,7 +120,9 @@ class Service:
             pipe = self.bundle["pipeline"]
             if self._explainer is None:
                 self._explainer = shap.TreeExplainer(pipe.steps[-1][1])
-            xt = x.reshape(1, -1)
+            import pandas as pd
+            xt = pd.DataFrame(x.reshape(1, -1),
+                              columns=self.bundle["feature_names"])
             for _, step in pipe.steps[:-1]:
                 xt = step.transform(xt)
             values = self._explainer.shap_values(np.asarray(xt, dtype=float))
@@ -136,9 +139,15 @@ class Service:
         self, x: np.ndarray, transaction_id: int, notify: bool = True,
     ) -> ScoreResponse:
         pipe = self.bundle["pipeline"]
-        prob = float(pipe.predict_proba(x.reshape(1, -1))[0, 1])
-        flagged = prob >= self.threshold
         names = self.bundle["feature_names"]
+        # Score through a named frame. The pipeline was fitted on a DataFrame,
+        # so passing a bare array makes scikit-learn warn about missing
+        # feature names on every single call -- thousands of warnings across a
+        # replay, and a real risk of silently mismatched column order.
+        import pandas as pd
+        row = pd.DataFrame(x.reshape(1, -1), columns=names)
+        prob = float(pipe.predict_proba(row)[0, 1])
+        flagged = prob >= self.threshold
         amount = float(x[names.index("Amount")]) if "Amount" in names else 0.0
 
         reasons: list[tuple[str, float]] = []
@@ -159,18 +168,23 @@ class Service:
 
 
 svc = Service()
-app = FastAPI(title="Fraud Detection Demo",
-              description="Serving the dissertation's final model at its "
-                          "cost-optimal threshold.",
-              version="1.0")
 
 
-@app.on_event("startup")
-def _startup() -> None:
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Load the model at startup. on_event is deprecated in current FastAPI."""
     try:
         svc.load()
     except FileNotFoundError as exc:
         print(f"[startup] {exc}")
+    yield
+
+
+app = FastAPI(lifespan=lifespan,
+              title="Fraud Detection Demo",
+              description="Serving the dissertation's final model at its "
+                          "cost-optimal threshold.",
+              version="1.0")
 
 
 @app.get("/health")
