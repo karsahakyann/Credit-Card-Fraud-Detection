@@ -86,6 +86,32 @@
       </div>
     </div>
 
+    <div class="card" style="margin-bottom:16px">
+      <h2>What-if: threshold &amp; model</h2>
+      <div class="row" style="margin-bottom:10px">
+        <select id="wmodel" style="background:#131a29;color:var(--ink);border:1px solid var(--line);border-radius:7px;padding:7px 10px;font-size:13px"></select>
+        <button id="wtuned" class="ghost">Use tuned t*</button>
+        <span class="sub" id="wthr">t = 0.11</span>
+      </div>
+      <input type="range" id="wslider" min="1" max="99" value="11" style="width:100%">
+      <div class="tiles" style="margin-top:12px">
+        <div class="tile"><div class="v hit" id="w-tp">—</div><div class="k">caught</div></div>
+        <div class="tile"><div class="v miss" id="w-fn">—</div><div class="k">missed</div></div>
+        <div class="tile"><div class="v" id="w-fp">—</div><div class="k">false alarms</div></div>
+        <div class="tile"><div class="v" id="w-cost">—</div><div class="k">total cost</div></div>
+      </div>
+      <div class="tiles" style="margin-top:10px">
+        <div class="tile"><div class="v" id="w-prec">—</div><div class="k">precision</div></div>
+        <div class="tile"><div class="v" id="w-rec">—</div><div class="k">recall</div></div>
+        <div class="tile"><div class="v" id="w-saved">—</div><div class="k">saved vs nothing</div></div>
+        <div class="tile"><div class="v" id="w-apply">—</div><div class="k">live threshold</div></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="wapply">Apply to live stream</button>
+        <span class="sub">evaluated over all 56,746 held-out transactions</span>
+      </div>
+    </div>
+
     <div class="card">
       <h2>Transaction stream</h2>
       <table>
@@ -187,6 +213,49 @@ $("skip").onclick = () => skipTo("alert", $("skip"));
 $("skipfraud").onclick = () => skipTo("fraud", $("skipfraud"));
 $("reset").onclick = async () => { pause(); await fetch("/replay/reset",{method:"POST"});
   $("stream").innerHTML=""; renderStats(await (await fetch("/stats")).json()); renderAlerts(); };
+
+
+// ---- what-if panel: instant re-threshold / model swap from cached scores ----
+let wTuned = {};
+async function initWhatIf(){
+  const m = await (await fetch("/models")).json();
+  const sel = $("wmodel");
+  sel.innerHTML = m.models.map(x =>
+    `<option value="${x.model}">${x.model}</option>`).join("");
+  m.models.forEach(x => wTuned[x.model] = x.tuned_threshold);
+  sel.value = "xgboost";
+  $("wslider").value = Math.round((wTuned["xgboost"] ?? 0.11) * 100);
+  refreshWhatIf();
+}
+async function refreshWhatIf(){
+  const model = $("wmodel").value;
+  const t = $("wslider").value / 100;
+  $("wthr").textContent = `t = ${t.toFixed(2)}`;
+  const r = await (await fetch(`/whatif?model=${model}&threshold=${t}`)).json();
+  $("w-tp").textContent = r.tp;
+  $("w-fn").textContent = r.fn;
+  $("w-fp").textContent = r.fp;
+  $("w-cost").textContent = eur(r.total_cost);
+  $("w-prec").textContent = r.precision == null ? "—" : r.precision.toFixed(3);
+  $("w-rec").textContent = r.recall == null ? "—" : r.recall.toFixed(3);
+  $("w-saved").textContent = eur(r.saved_vs_baseline);
+}
+$("wslider").oninput = refreshWhatIf;
+$("wmodel").onchange = () => {
+  $("wslider").value = Math.round((wTuned[$("wmodel").value] ?? 0.5) * 100);
+  refreshWhatIf();
+};
+$("wtuned").onclick = () => {
+  $("wslider").value = Math.round((wTuned[$("wmodel").value] ?? 0.5) * 100);
+  refreshWhatIf();
+};
+$("wapply").onclick = async () => {
+  const t = $("wslider").value / 100;
+  const r = await (await fetch(`/threshold?value=${t}`, {method:"POST"})).json();
+  $("w-apply").textContent = r.threshold.toFixed(2);
+  health();
+};
+initWhatIf();
 
 health();
 fetch("/stats").then(r=>r.json()).then(renderStats);

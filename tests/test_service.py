@@ -121,3 +121,47 @@ def test_both_skip_modes_keep_tallies_exact(client):
         s = r["stats"]
         assert s["processed"] == s["tp"] + s["fp"] + s["fn"] + s["tn"]
         assert s["processed"] == r["skipped"] + len(r["scored"])
+
+
+def test_whatif_reproduces_the_published_result(client):
+    """XGBoost at the Phase 5 threshold must match the committed figures."""
+    r = client.get("/whatif?model=xgboost&threshold=0.11").json()
+    assert r["tp"] == 56 and r["fn"] == 18 and r["fp"] == 10
+    assert abs(r["total_cost"] - 3337) < 1
+
+
+def test_whatif_rejects_bad_input(client):
+    assert client.get("/whatif?model=nope").status_code == 422
+    assert client.get("/whatif?model=xgboost&threshold=5").status_code == 422
+
+
+def test_whatif_threshold_monotonicity(client):
+    """Raising the threshold can only flag fewer transactions."""
+    prev = None
+    for t in (0.05, 0.2, 0.5, 0.9):
+        r = client.get(f"/whatif?model=xgboost&threshold={t}").json()
+        flagged = r["tp"] + r["fp"]
+        if prev is not None:
+            assert flagged <= prev
+        prev = flagged
+
+
+def test_models_lists_comparable_models(client):
+    names = [m["model"] for m in client.get("/models").json()["models"]]
+    assert {"xgboost", "random_forest", "logistic_regression", "dnn"} <= set(names)
+
+
+def test_runtime_threshold_changes_decisions(client):
+    base = client.get("/health").json()["threshold"]
+    client.post("/threshold?value=0.9")
+    assert client.get("/health").json()["threshold"] == 0.9
+    client.post("/threshold/reset")
+    assert client.get("/health").json()["threshold"] == base
+
+
+def test_runtime_threshold_validates(client):
+    assert client.post("/threshold?value=2").status_code == 422
+
+
+def test_feedback_endpoint_starts_empty(client):
+    assert "count" in client.get("/feedback").json()

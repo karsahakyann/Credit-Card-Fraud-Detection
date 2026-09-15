@@ -80,6 +80,9 @@ class Service:
         self.bundle: dict[str, Any] | None = None
         self.replay: dict[str, Any] | None = None
         self.state = ReplayState()
+        self._threshold_override: float | None = None
+        self.feedback: dict[int, str] = {}      # analyst verdicts from Telegram
+        self.controller = None
         self.notifier = build_default_notifier()
         self.inbox: InMemoryNotifier = next(
             b for b in self.notifier.backends if isinstance(b, InMemoryNotifier)
@@ -102,6 +105,7 @@ class Service:
             "columns": [str(c) for c in z["columns"]],
         }
         self.state.reset()
+        self.load_whatif()
 
     @property
     def ready(self) -> bool:
@@ -109,7 +113,24 @@ class Service:
 
     @property
     def threshold(self) -> float:
+        if self._threshold_override is not None:
+            return float(self._threshold_override)
         return float(self.bundle["threshold"]) if self.bundle else float("nan")
+
+    def set_threshold(self, value: float) -> float:
+        """Override the deployed threshold at runtime (Telegram / dashboard).
+
+        The tuned value from Phase 5 stays in the bundle, so reset_threshold
+        always returns to the figure the cost analysis actually selected.
+        """
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("threshold must be between 0 and 1")
+        self._threshold_override = float(value)
+        return self.threshold
+
+    def reset_threshold(self) -> float:
+        self._threshold_override = None
+        return self.threshold
 
     # -- scoring ---------------------------------------------------------
     def _explain(self, x: np.ndarray, top_n: int = 3) -> list[tuple[str, float]]:
@@ -167,7 +188,155 @@ class Service:
         )
 
 
+    # ---- what-if analysis -------------------------------------------
+    WHATIF_MODELS = {
+        "xgboost": "xgboost_none_{p}.npy",
+        "random_forest": "random_forest_none_{p}.npy",
+        "logistic_regression": "logistic_regression_none_{p}.npy",
+        "dnn": "dnn_{p}.npy",
+    }
+
+    def load_whatif(self) -> None:
+        """Cache every model's test-set scores for instant what-if analysis.
+
+        These are the score files Phases 2 and 3 saved: the same models on
+        the same held-out rows the live stream replays. Caching them lets the
+        threshold slider and the model switcher recompute a full confusion
+        matrix and cost in microseconds, instead of refitting anything.
+
+        The live stream still scores through the real pipeline. This path is
+        explicitly a what-if panel over the whole test set, which is why it
+        is kept separate rather than driving the stream.
+        """
+        from . import experiment
+        self.whatif: dict[str, np.ndarray] = {}
+        for name, pattern in self.WHATIF_MODELS.items():
+            path = experiment.SCORES_DIR / pattern.format(p=self.protocol)
+            if path.exists():
+                arr = np.load(path)
+                if len(arr) == len(self.replay["y"]):
+                    self.whatif[name] = arr
+
+    def whatif_eval(self, model: str, threshold: float) -> dict:
+        """Confusion matrix and cost for one (model, threshold), instantly."""
+        if model not in self.whatif:
+            raise KeyError(model)
+        scores = self.whatif[model]
+        y = np.asarray(self.replay["y"]).astype(bool)
+        amounts = np.asarray(self.replay["amounts"], dtype=float)
+        flagged = scores >= threshold
+        tp = int(np.sum(y & flagged)); fp = int(np.sum(~y & flagged))
+        fn = int(np.sum(y & ~flagged)); tn = int(np.sum(~y & ~flagged))
+        review = float(self.bundle["review_cost"]) * (tp + fp)
+        loss = float(amounts[y & ~flagged].sum())
+        no_model = float(amounts[y].sum())
+        return {
+            "model": model, "threshold": round(threshold, 3),
+            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "precision": (tp / (tp + fp)) if (tp + fp) else None,
+            "recall": (tp / (tp + fn)) if (tp + fn) else None,
+            "review_cost": round(review, 2),
+            "money_lost": round(loss, 2),
+            "total_cost": round(review + loss, 2),
+            "baseline_cost": round(no_model, 2),
+            "saved_vs_baseline": round(no_model - (review + loss), 2),
+        }
+
+
 svc = Service()
+
+
+def _start_controller() -> None:
+    """Attach Telegram's return path: inline buttons and slash commands."""
+    import os
+    from .alerts import TelegramNotifier, load_dotenv
+    from .telegram_control import TelegramController, build_alert_keyboard
+
+    load_dotenv()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not (token and chat_id):
+        return
+
+    # attach the inline keyboard to outgoing alerts
+    for backend in svc.notifier.backends:
+        inner = getattr(backend, "backend", backend)
+        if isinstance(inner, TelegramNotifier):
+            inner.keyboard_factory = build_alert_keyboard
+
+    def h_stats() -> str:
+        s = stats()
+        return (f"Replay: {s['processed']:,} processed\n"
+                f"caught {s['tp']} / missed {s['fn']} / false alarms {s['fp']}\n"
+                f"precision {s['precision'] or 0:.3f}  recall {s['recall'] or 0:.3f}\n"
+                f"lost EUR {s['money_lost']:,.0f}  total cost EUR {s['total_cost']:,.0f}\n"
+                f"threshold {s['threshold']:.2f}")
+
+    def h_get_threshold() -> str:
+        return (f"Current threshold {svc.threshold:.2f} "
+                f"(Phase 5 tuned value: {float(svc.bundle['threshold']):.2f})")
+
+    def h_set_threshold(v: float) -> str:
+        svc.set_threshold(v)
+        r = svc.whatif_eval("xgboost", v)
+        return (f"Threshold set to {v:.2f}\n"
+                f"Over the full test set that would catch {r['tp']}/{r['tp']+r['fn']} "
+                f"frauds with {r['fp']} false alarms,\n"
+                f"costing EUR {r['total_cost']:,.0f} "
+                f"(saving EUR {r['saved_vs_baseline']:,.0f} vs doing nothing).")
+
+    def h_models() -> str:
+        rows = models()["models"]
+        return "Comparable models:\n" + "\n".join(
+            f"  {m['model']} (tuned {m['tuned_threshold']})" for m in rows)
+
+    def h_whatif(model: str, thr: float | None) -> str:
+        if model not in svc.whatif:
+            return f"Unknown model. Try: {', '.join(sorted(svc.whatif))}"
+        t = svc.threshold if thr is None else thr
+        r = svc.whatif_eval(model, t)
+        return (f"{model} at threshold {r['threshold']}\n"
+                f"caught {r['tp']}/{r['tp']+r['fn']}  false alarms {r['fp']}\n"
+                f"precision {r['precision'] or 0:.3f}  recall {r['recall'] or 0:.3f}\n"
+                f"total cost EUR {r['total_cost']:,.0f}")
+
+    def h_feedback(tid: int, verdict: str) -> str:
+        svc.feedback[tid] = verdict
+        truth = None
+        try:
+            truth = bool(svc.replay["y"][tid])
+        except Exception:                                      # noqa: BLE001
+            pass
+        said = "fraud" if verdict == "fraud" else "legitimate"
+        if truth is None:
+            return f"Recorded: transaction {tid} marked {said}."
+        agrees = (verdict == "fraud") == truth
+        return (f"Recorded: transaction {tid} marked {said}.\n"
+                f"Ground truth: {'fraud' if truth else 'legitimate'} — "
+                f"{'your call matches' if agrees else 'your call differs'}.")
+
+    def h_explain(tid: int) -> str:
+        try:
+            x = svc.replay["X"][tid]
+        except Exception:                                      # noqa: BLE001
+            return f"Transaction {tid} is not in the replay."
+        reasons = svc._explain(x, top_n=5)
+        if not reasons:
+            return "No explanation available."
+        lines = [f"Why transaction {tid} was flagged:"]
+        for feat, val in reasons:
+            lines.append(f"  {feat}: {val:+.2f} "
+                         f"{'toward fraud' if val > 0 else 'toward legitimate'}")
+        return "\n".join(lines)
+
+    ctrl = TelegramController(token, chat_id, {
+        "stats": h_stats, "get_threshold": h_get_threshold,
+        "set_threshold": h_set_threshold, "models": h_models,
+        "whatif": h_whatif, "feedback": h_feedback, "explain": h_explain,
+    })
+    if ctrl.start():
+        svc.controller = ctrl
+        print("[startup] Telegram controller listening for commands")
 
 
 @asynccontextmanager
@@ -177,7 +346,13 @@ async def lifespan(_app: FastAPI):
         svc.load()
     except FileNotFoundError as exc:
         print(f"[startup] {exc}")
+    try:
+        _start_controller()
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[startup] Telegram controller unavailable: {type(exc).__name__}")
     yield
+    if svc.controller is not None:
+        svc.controller.stop()
 
 
 app = FastAPI(lifespan=lifespan,
@@ -346,6 +521,92 @@ def stats() -> dict:
         "total_cost": round(s.fn_loss + s.review_cost_total, 2),
         "threshold": svc.threshold if svc.ready else None,
     }
+
+
+@app.post("/threshold")
+def set_threshold(value: float) -> dict:
+    """Re-threshold the running service (dashboard slider / Telegram)."""
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    try:
+        svc.set_threshold(value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"threshold": svc.threshold,
+            "tuned_threshold": float(svc.bundle["threshold"])}
+
+
+@app.post("/threshold/reset")
+def reset_threshold() -> dict:
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    return {"threshold": svc.reset_threshold()}
+
+
+@app.get("/feedback")
+def feedback() -> dict:
+    """Analyst verdicts collected from Telegram buttons, against the truth."""
+    rows = []
+    for tid, verdict in list(svc.feedback.items())[-50:]:
+        truth = None
+        try:
+            truth = bool(svc.replay["y"][tid])
+        except Exception:                                      # noqa: BLE001
+            pass
+        rows.append({"transaction_id": tid, "analyst": verdict,
+                     "actual_fraud": truth,
+                     "agrees": None if truth is None
+                               else (verdict == "fraud") == truth})
+    return {"count": len(svc.feedback), "recent": rows}
+
+
+@app.get("/whatif")
+def whatif(model: str = "xgboost", threshold: float | None = None) -> dict:
+    """Re-threshold or swap model instantly, over the whole test set."""
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    if model not in svc.whatif:
+        raise HTTPException(
+            422, f"Unknown model {model!r}; have {sorted(svc.whatif)}")
+    t = svc.threshold if threshold is None else float(threshold)
+    if not 0.0 <= t <= 1.0:
+        raise HTTPException(422, "threshold must be between 0 and 1")
+    return svc.whatif_eval(model, t)
+
+
+@app.get("/whatif/curve")
+def whatif_curve(model: str = "xgboost", steps: int = 50) -> dict:
+    """Cost and recall across the threshold range, for plotting the slider."""
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    if model not in svc.whatif:
+        raise HTTPException(422, f"Unknown model {model!r}")
+    pts = []
+    for t in np.linspace(0.01, 0.99, max(5, min(steps, 200))):
+        r = svc.whatif_eval(model, float(t))
+        pts.append({"threshold": round(float(t), 3),
+                    "total_cost": r["total_cost"],
+                    "recall": r["recall"], "precision": r["precision"]})
+    best = min(pts, key=lambda r: r["total_cost"])
+    return {"model": model, "points": pts, "best": best,
+            "deployed_threshold": svc.threshold}
+
+
+@app.get("/models")
+def models() -> dict:
+    """Which models the what-if panel can compare, and their tuned thresholds."""
+    import pandas as pd
+    out = []
+    try:
+        sel = pd.read_csv(config.RESULTS_DIR / "threshold_selection.csv")
+        sel = sel[(sel.protocol == svc.protocol) & (sel.review_cost == 10.0)]
+        tuned = dict(zip(sel.model, sel.threshold_selected_on_train))
+    except Exception:                                          # noqa: BLE001
+        tuned = {}
+    for name in sorted(svc.whatif):
+        out.append({"model": name,
+                    "tuned_threshold": round(float(tuned.get(name, 0.5)), 3)})
+    return {"models": out, "protocol": svc.protocol}
 
 
 @app.get("/alerts")

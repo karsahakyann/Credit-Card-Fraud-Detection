@@ -123,6 +123,10 @@ class TelegramNotifier:
         self.chat_id = chat_id or os.environ.get("TELEGRAM_CHAT_ID", "")
         self.timeout = timeout
         self.last_error: str | None = None
+        # Optional callable(transaction_id) -> Telegram reply_markup dict.
+        # Injected rather than imported so alerts.py stays free of any
+        # dependency on the control layer.
+        self.keyboard_factory = None
 
     @property
     def enabled(self) -> bool:
@@ -135,10 +139,16 @@ class TelegramNotifier:
         try:
             import requests
 
+            payload = {"chat_id": self.chat_id, "text": alert.as_text()}
+            if self.keyboard_factory is not None:
+                try:
+                    payload["reply_markup"] = self.keyboard_factory(
+                        alert.transaction_id)
+                except Exception:                             # noqa: BLE001
+                    pass       # a broken keyboard must not block the alert
             response = requests.post(
                 f"{self.API}/bot{self.token}/sendMessage",
-                json={"chat_id": self.chat_id, "text": alert.as_text()},
-                timeout=self.timeout,
+                json=payload, timeout=self.timeout,
             )
             if response.status_code == 429:
                 # Telegram throttles per chat. A replay that hits a cluster
