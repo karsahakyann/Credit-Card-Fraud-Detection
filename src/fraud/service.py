@@ -300,20 +300,69 @@ def _start_controller() -> None:
                 f"precision {r['precision'] or 0:.3f}  recall {r['recall'] or 0:.3f}\n"
                 f"total cost EUR {r['total_cost']:,.0f}")
 
-    def h_feedback(tid: int, verdict: str) -> str:
-        svc.feedback[tid] = verdict
-        truth = None
-        try:
-            truth = bool(svc.replay["y"][tid])
-        except Exception:                                      # noqa: BLE001
-            pass
-        said = "fraud" if verdict == "fraud" else "legitimate"
-        if truth is None:
-            return f"Recorded: transaction {tid} marked {said}."
-        agrees = (verdict == "fraud") == truth
-        return (f"Recorded: transaction {tid} marked {said}.\n"
-                f"Ground truth: {'fraud' if truth else 'legitimate'} — "
-                f"{'your call matches' if agrees else 'your call differs'}.")
+    def h_feedback(tid: int, disposition: str) -> str:
+        """Record a workflow action. Deliberately does not reveal the label.
+
+        An analyst does not learn whether an alert was fraud at the moment
+        they triage it; the answer arrives later, with a chargeback or a
+        customer call. Revealing it here would make the demo a quiz on
+        anonymised PCA components, which no human can read. Outcomes are
+        released in aggregate by /review instead.
+        """
+        svc.feedback[tid] = disposition
+        action = "escalated for investigation" if disposition == "escalate" \
+            else "dismissed"
+        n = len(svc.feedback)
+        return (f"Transaction {tid} {action}.\n"
+                f"{n} case(s) triaged this session. "
+                f"Send /review to see how the queue turned out.")
+
+    def h_review() -> str:
+        """Release the outcomes, the way delayed labels arrive in practice."""
+        if not svc.feedback:
+            return ("No cases triaged yet. Escalate or dismiss a few alerts "
+                    "first, then send /review.")
+        esc_right = esc_wrong = dis_right = dis_wrong = 0
+        missed_value = 0.0
+        for tid, disp in svc.feedback.items():
+            try:
+                truth = bool(svc.replay["y"][tid])
+                amount = float(svc.replay["amounts"][tid])
+            except Exception:                                  # noqa: BLE001
+                continue
+            if disp == "escalate":
+                esc_right += truth; esc_wrong += not truth
+            else:
+                dis_wrong += truth; dis_right += not truth
+                if truth:
+                    missed_value += amount
+        total = esc_right + esc_wrong + dis_right + dis_wrong
+        if not total:
+            return "No triaged cases could be matched to outcomes."
+        was = lambda n: "was" if n == 1 else "were"        # noqa: E731
+        lines = [
+            f"Review of {total} triaged case{'' if total == 1 else 's'}",
+            "",
+            f"Escalated: {esc_right + esc_wrong}"
+            f"  ({esc_right} {was(esc_right)} fraud, "
+            f"{esc_wrong} {was(esc_wrong)} not)",
+            f"Dismissed: {dis_right + dis_wrong}"
+            f"  ({dis_right} {was(dis_right)} fine, "
+            f"{dis_wrong} {was(dis_wrong)} fraud)",
+        ]
+        if esc_right + esc_wrong:
+            lines.append(f"Your escalation precision: "
+                         f"{esc_right / (esc_right + esc_wrong):.2f}")
+        if dis_wrong:
+            lines.append(f"Value dismissed in error: EUR {missed_value:,.2f}")
+        lines += [
+            "",
+            "Note: V1-V28 are anonymised PCA components, so a human cannot",
+            "read them. Any accuracy here is close to chance -- which is the",
+            "point. The model reaches 0.85 precision on features nobody can",
+            "interpret.",
+        ]
+        return "\n".join(lines)
 
     def h_explain(tid: int) -> str:
         try:
@@ -330,7 +379,7 @@ def _start_controller() -> None:
         return "\n".join(lines)
 
     ctrl = TelegramController(token, chat_id, {
-        "stats": h_stats, "get_threshold": h_get_threshold,
+        "stats": h_stats, "review": h_review, "get_threshold": h_get_threshold,
         "set_threshold": h_set_threshold, "models": h_models,
         "whatif": h_whatif, "feedback": h_feedback, "explain": h_explain,
     })
@@ -544,20 +593,29 @@ def reset_threshold() -> dict:
 
 
 @app.get("/feedback")
-def feedback() -> dict:
-    """Analyst verdicts collected from Telegram buttons, against the truth."""
+def feedback(reveal: bool = False) -> dict:
+    """Triage dispositions collected from Telegram.
+
+    Outcomes are withheld by default, mirroring the delay before a chargeback
+    or customer confirmation establishes the truth. Pass reveal=true for the
+    end-of-session summary.
+    """
     rows = []
-    for tid, verdict in list(svc.feedback.items())[-50:]:
-        truth = None
-        try:
-            truth = bool(svc.replay["y"][tid])
-        except Exception:                                      # noqa: BLE001
-            pass
-        rows.append({"transaction_id": tid, "analyst": verdict,
-                     "actual_fraud": truth,
-                     "agrees": None if truth is None
-                               else (verdict == "fraud") == truth})
-    return {"count": len(svc.feedback), "recent": rows}
+    for tid, disposition in list(svc.feedback.items())[-50:]:
+        row = {"transaction_id": tid, "disposition": disposition}
+        if reveal:
+            try:
+                row["actual_fraud"] = bool(svc.replay["y"][tid])
+            except Exception:                                  # noqa: BLE001
+                row["actual_fraud"] = None
+        rows.append(row)
+    out = {"count": len(svc.feedback), "revealed": reveal, "recent": rows}
+    if reveal:
+        esc = [r for r in rows if r["disposition"] == "escalate"]
+        hits = [r for r in esc if r.get("actual_fraud")]
+        out["escalated"] = len(esc)
+        out["escalated_were_fraud"] = len(hits)
+    return out
 
 
 @app.get("/whatif")

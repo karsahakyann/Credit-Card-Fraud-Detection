@@ -165,3 +165,25 @@ def test_runtime_threshold_validates(client):
 
 def test_feedback_endpoint_starts_empty(client):
     assert "count" in client.get("/feedback").json()
+
+
+def test_feedback_withholds_outcomes_by_default(client):
+    """Truth must not leak into triage: it arrives later, as in practice."""
+    from fraud.service import svc
+    svc.feedback.clear()
+    svc.feedback[1885] = "escalate"
+    body = client.get("/feedback").json()
+    assert body["revealed"] is False
+    assert "actual_fraud" not in body["recent"][0]
+    assert body["recent"][0]["disposition"] == "escalate"
+
+
+def test_feedback_reveals_only_when_asked(client):
+    from fraud.service import svc
+    svc.feedback.clear()
+    svc.feedback[1885] = "escalate"          # a genuine fraud in the replay
+    body = client.get("/feedback?reveal=true").json()
+    assert body["revealed"] is True
+    assert body["recent"][0]["actual_fraud"] is True
+    assert body["escalated"] == 1 and body["escalated_were_fraud"] == 1
+    svc.feedback.clear()

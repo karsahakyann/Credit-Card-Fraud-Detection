@@ -27,15 +27,23 @@ def ctrl(calls):
         "stats": rec("stats"), "get_threshold": rec("get_threshold"),
         "set_threshold": rec("set_threshold"), "models": rec("models"),
         "whatif": rec("whatif"), "feedback": rec("feedback"),
-        "explain": rec("explain"),
+        "explain": rec("explain"), "review": rec("review"),
     })
 
 
-def test_keyboard_encodes_the_transaction(ctrl):
+def test_keyboard_offers_dispositions_not_verdicts(ctrl):
+    """Buttons record what an analyst would DO, not what the label is.
+
+    A reviewer cannot adjudicate anonymised PCA components on sight, so the
+    keyboard must not ask them to.
+    """
     kb = build_alert_keyboard(1885)
     data = [b["callback_data"] for row in kb["inline_keyboard"] for b in row]
-    assert "fb:1885:fraud" in data and "fb:1885:legit" in data
+    labels = [b["text"] for row in kb["inline_keyboard"] for b in row]
+    assert "fb:1885:escalate" in data and "fb:1885:dismiss" in data
     assert "ex:1885:_" in data
+    joined = " ".join(labels).lower()
+    assert "fraud" not in joined and "false alarm" not in joined
 
 
 def test_help_lists_the_commands(ctrl):
@@ -81,11 +89,16 @@ def test_unknown_command_is_not_fatal(ctrl):
     assert "Unknown command" in ctrl.handle_command("/banana")
 
 
-def test_button_tap_records_feedback(ctrl, calls):
-    ctrl.handle_callback("fb:1885:fraud")
-    assert calls["feedback"] == (1885, "fraud")
-    ctrl.handle_callback("fb:42:legit")
-    assert calls["feedback"] == (42, "legit")
+def test_button_tap_records_disposition(ctrl, calls):
+    ctrl.handle_callback("fb:1885:escalate")
+    assert calls["feedback"] == (1885, "escalate")
+    ctrl.handle_callback("fb:42:dismiss")
+    assert calls["feedback"] == (42, "dismiss")
+
+
+def test_review_command_dispatches(ctrl, calls):
+    ctrl.handle_command("/review")
+    assert "review" in calls
 
 
 def test_explain_button_dispatches(ctrl, calls):

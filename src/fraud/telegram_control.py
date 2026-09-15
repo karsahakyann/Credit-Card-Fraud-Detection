@@ -7,11 +7,20 @@ deployed system rather than a notification toy.
 Two mechanisms, both over Telegram's polling API so no public webhook or
 tunnel is needed -- important for demonstrating on conference wifi:
 
-**Inline buttons on every alert.** Confirm fraud / False alarm / Explain.
-Tapping sends a callback the service records as analyst feedback, which the
-dashboard then shows against the model's own verdict. That is the
-human-in-the-loop review step a real fraud team performs, and it makes the
-precision number concrete: each false alarm is a tap someone had to make.
+**Inline buttons on every alert.** Escalate / Dismiss / Explain.
+
+These record a *disposition*, not a verdict, and the distinction matters. A
+real analyst does not know whether an alert is fraud when it arrives -- they
+investigate, and the truth only surfaces later when a chargeback is filed or
+the cardholder confirms, often weeks afterwards. Asking a reviewer to label
+an alert correct or incorrect on sight would be asking for a judgment the
+data cannot support: the features are anonymised PCA components, so no human
+can read them.
+
+So the buttons capture what an analyst would *do*, and the ground truth is
+withheld until the session summary. That mirrors the delayed-label problem
+that makes supervised fraud detection hard in practice, and it keeps the
+demo honest about what a person can and cannot contribute here.
 
 **Slash commands.** ``/threshold 0.3`` re-thresholds the running service,
 ``/stats`` returns live tallies, ``/whatif`` compares models. Adjusting a
@@ -37,13 +46,17 @@ API = "https://api.telegram.org"
 
 
 def build_alert_keyboard(transaction_id: int) -> dict:
-    """Inline keyboard attached to each fraud alert."""
+    """Inline keyboard attached to each fraud alert.
+
+    Escalate and dismiss are workflow actions, not claims about the truth --
+    see the module docstring for why that distinction is deliberate.
+    """
     return {
         "inline_keyboard": [[
-            {"text": "✅ Confirm fraud",
-             "callback_data": f"fb:{transaction_id}:fraud"},
-            {"text": "❌ False alarm",
-             "callback_data": f"fb:{transaction_id}:legit"},
+            {"text": "\U0001f4cb Escalate",
+             "callback_data": f"fb:{transaction_id}:escalate"},
+            {"text": "\U0001f5c4 Dismiss",
+             "callback_data": f"fb:{transaction_id}:dismiss"},
         ], [
             {"text": "\U0001f50d Explain",
              "callback_data": f"ex:{transaction_id}:_"},
@@ -107,14 +120,19 @@ class TelegramController:
             return (
                 "Fraud demo controls\n\n"
                 "/stats - live tallies from the replay\n"
+                "/review - how your escalate/dismiss calls turned out\n"
                 "/threshold <0-1> - re-threshold the running service\n"
                 "/threshold - show the current threshold\n"
                 "/whatif <model> [threshold] - compare a model\n"
                 "/models - list comparable models\n\n"
-                "Alerts carry buttons: confirm, reject, or ask for an explanation."
+                "Alerts carry buttons: escalate, dismiss, or ask for an "
+                "explanation. Outcomes stay hidden until /review, the way a "
+                "real queue works."
             )
         if cmd == "stats":
             return self.handlers["stats"]()
+        if cmd == "review":
+            return self.handlers["review"]()
         if cmd == "models":
             return self.handlers["models"]()
         if cmd == "threshold":
