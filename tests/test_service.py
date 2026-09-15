@@ -187,3 +187,46 @@ def test_feedback_reveals_only_when_asked(client):
     assert body["recent"][0]["actual_fraud"] is True
     assert body["escalated"] == 1 and body["escalated_were_fraud"] == 1
     svc.feedback.clear()
+
+
+def test_models_reports_which_can_serve_live(client):
+    d = client.get("/models").json()
+    assert "live_models" in d and "current" in d
+    assert d["current"] in d["live_models"]
+    for row in d["models"]:
+        assert "can_serve_live" in row
+
+
+def test_switching_model_changes_threshold_and_name(client):
+    before = client.get("/health").json()
+    r = client.post("/model?name=random_forest")
+    assert r.status_code == 200
+    after = client.get("/health").json()
+    assert after["model_key"] == "random_forest"
+    assert after["threshold"] != before["threshold"]
+    client.post("/model?name=xgboost")          # restore
+
+
+def test_switching_rejects_unbuilt_model(client):
+    r = client.post("/model?name=not_a_model")
+    assert r.status_code == 422
+    assert "Available" in r.json()["detail"]
+
+
+def test_switching_resets_the_replay(client):
+    """A run must not mix two models' decisions."""
+    client.post("/replay/reset")
+    client.get("/replay/next?n=50&notify=false")
+    assert client.get("/stats").json()["processed"] == 50
+    client.post("/model?name=random_forest")
+    assert client.get("/stats").json()["processed"] == 0
+    client.post("/model?name=xgboost")
+
+
+def test_each_model_restores_its_own_tuned_threshold(client):
+    seen = {}
+    for name in ("xgboost", "random_forest", "logistic_regression"):
+        client.post(f"/model?name={name}")
+        seen[name] = client.get("/health").json()["threshold"]
+    client.post("/model?name=xgboost")
+    assert len(set(seen.values())) == 3, f"thresholds should differ: {seen}"

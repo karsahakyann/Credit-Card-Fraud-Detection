@@ -90,8 +90,22 @@ class Service:
         self._explainer = None
 
     # -- loading ---------------------------------------------------------
-    def load(self) -> None:
-        model_path = MODEL_DIR / f"final_{self.protocol}.joblib"
+    def available_models(self) -> list[str]:
+        """Model keys with a persisted artefact for the current protocol."""
+        found = []
+        for path in sorted(MODEL_DIR.glob(f"final_{self.protocol}_*.joblib")):
+            found.append(path.stem.replace(f"final_{self.protocol}_", ""))
+        return found
+
+    def load(self, model_key: str | None = None) -> None:
+        if model_key:
+            model_path = MODEL_DIR / f"final_{self.protocol}_{model_key}.joblib"
+            if not model_path.exists():
+                raise FileNotFoundError(
+                    f"No artefact for {model_key!r}. Available: "
+                    f"{self.available_models()}")
+        else:
+            model_path = MODEL_DIR / f"final_{self.protocol}.joblib"
         replay_path = MODEL_DIR / f"replay_{self.protocol}.npz"
         if not model_path.exists() or not replay_path.exists():
             raise FileNotFoundError(
@@ -99,6 +113,9 @@ class Service:
                 "Run: ./venv/bin/python scripts/train_final_model.py"
             )
         self.bundle = joblib.load(model_path)
+        self.model_key = self.bundle.get("model_key", "xgboost")
+        self._explainer = None            # explainer is model-specific
+        self._threshold_override = None   # each model has its own tuned value
         z = np.load(replay_path, allow_pickle=True)
         self.replay = {
             "X": z["X"], "y": z["y"], "amounts": z["amounts"],
@@ -139,6 +156,8 @@ class Service:
             import shap
 
             pipe = self.bundle["pipeline"]
+            if not hasattr(pipe, "steps"):
+                return []           # only pipelined tree models are explained
             if self._explainer is None:
                 self._explainer = shap.TreeExplainer(pipe.steps[-1][1])
             import pandas as pd
@@ -166,7 +185,10 @@ class Service:
         # feature names on every single call -- thousands of warnings across a
         # replay, and a real risk of silently mismatched column order.
         import pandas as pd
-        row = pd.DataFrame(x.reshape(1, -1), columns=names)
+        if self.bundle.get("needs_float32"):
+            row = x.reshape(1, -1).astype(np.float32)
+        else:
+            row = pd.DataFrame(x.reshape(1, -1), columns=names)
         prob = float(pipe.predict_proba(row)[0, 1])
         flagged = prob >= self.threshold
         amount = float(x[names.index("Amount")]) if "Amount" in names else 0.0
@@ -417,6 +439,7 @@ def health() -> dict:
         "ready": svc.ready,
         "protocol": svc.protocol,
         "model": svc.bundle["model_name"] if svc.ready else None,
+        "model_key": getattr(svc, "model_key", None),
         "threshold": svc.threshold if svc.ready else None,
         "notifiers": svc.notifier.status(),
         # Configured is not the same as working: surface the last delivery
@@ -650,6 +673,31 @@ def whatif_curve(model: str = "xgboost", steps: int = 50) -> dict:
             "deployed_threshold": svc.threshold}
 
 
+@app.post("/model")
+def switch_model(name: str) -> dict:
+    """Swap the live scoring model without restarting the service.
+
+    Reloads the persisted artefact for that model and resets the replay, so
+    the run that follows is a clean evaluation by the new model rather than
+    a mixture of two. Each model carries its own cost-optimal threshold, so
+    switching restores that too.
+    """
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    available = svc.available_models()
+    if name not in available:
+        raise HTTPException(
+            422, f"No artefact for {name!r}. Available: {available}. "
+                 "Run scripts/train_final_model.py to build more.")
+    try:
+        svc.load(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    svc.inbox.clear()
+    return {"model": svc.bundle["model_name"], "model_key": svc.model_key,
+            "threshold": svc.threshold, "protocol": svc.protocol}
+
+
 @app.get("/models")
 def models() -> dict:
     """Which models the what-if panel can compare, and their tuned thresholds."""
@@ -664,7 +712,12 @@ def models() -> dict:
     for name in sorted(svc.whatif):
         out.append({"model": name,
                     "tuned_threshold": round(float(tuned.get(name, 0.5)), 3)})
-    return {"models": out, "protocol": svc.protocol}
+    live = set(svc.available_models())
+    for row in out:
+        row["can_serve_live"] = row["model"] in live
+    return {"models": out, "protocol": svc.protocol,
+            "current": getattr(svc, "model_key", None),
+            "live_models": sorted(live)}
 
 
 @app.get("/alerts")

@@ -85,6 +85,10 @@
   <h1>Fraud Detection Console</h1>
   <span class="meta" id="meta">loading</span>
   <span style="flex:1"></span>
+  <label class="meta" for="modelsel" style="margin-right:-6px">Model</label>
+  <select id="modelsel" style="font:inherit;font-size:12px;padding:4px 8px;
+    border:1px solid var(--line-strong);border-radius:5px;background:var(--surface);
+    color:var(--ink)"></select>
   <span class="tag" id="t-proto">—</span>
   <span class="tag" id="t-tg">telegram</span>
 </header>
@@ -219,6 +223,31 @@ async function alerts(){
     </div>`).join("");
 }
 
+async function initModelPicker(){
+  const d = await (await fetch("/models")).json();
+  const label = {xgboost:"XGBoost", random_forest:"Random Forest",
+                 logistic_regression:"Logistic Regression", dnn:"Neural network"};
+  const sel = $("modelsel");
+  sel.innerHTML = d.models.map(m => {
+    const live = m.can_serve_live;
+    return `<option value="${m.model}" ${live?"":"disabled"}>` +
+           `${label[m.model]||m.model}${live?"":" (not built)"}</option>`;
+  }).join("");
+  if(d.current) sel.value = d.current;
+  sel.onchange = async () => {
+    sel.disabled = true;
+    const r = await fetch(`/model?name=${sel.value}`, {method:"POST"});
+    if(!r.ok){ alert((await r.json()).detail); }
+    else {
+      $("stream").innerHTML='<tr><td colspan="5" class="empty">Live tail &mdash; press Start or Step to populate</td></tr>';
+      streamRows=0;
+      stats(await (await fetch("/stats")).json());
+      alerts(); health();
+    }
+    sel.disabled = false;
+  };
+}
+
 async function comparison(){
   const {models} = await (await fetch("/models")).json();
   const rows = await Promise.all(models.map(async m => {
@@ -266,7 +295,7 @@ $("reset").onclick=async()=>{ pause(); await fetch("/replay/reset",{method:"POST
 // Load current state on open, not only once a tick has run: a page
 // refreshed mid-session was showing an empty alert feed while the counters
 // said otherwise.
-health(); comparison(); alerts();
+health(); comparison(); alerts(); initModelPicker();
 fetch("/stats").then(r=>r.json()).then(stats);
 setInterval(health, 5000);
 </script>
