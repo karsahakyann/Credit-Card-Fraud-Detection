@@ -1,0 +1,64 @@
+section,model,protocol,metric,before,after,change
+generalisation,xgboost,stratified,train PR-AUC,0.9960378750170118,0.8967190634931075,-0.09931881152390432
+generalisation,xgboost,stratified,OOF PR-AUC,0.8487814815214411,0.8370479556493479,-0.011733525872093198
+generalisation,xgboost,stratified,test PR-AUC,0.8330321077464237,0.8129283869404191,-0.020103720806004532
+generalisation,xgboost,stratified,train-test gap,0.1630057672705881,0.0837906765526883,-0.0792150907178998
+generalisation,random_forest,stratified,train PR-AUC,0.9313095222356008,0.8891777205815947,-0.042131801654006096
+generalisation,random_forest,stratified,OOF PR-AUC,0.8355503954106261,0.8238222936941416,-0.01172810171648453
+generalisation,random_forest,stratified,test PR-AUC,0.7866425678695813,0.7877870259570996,0.0011444580875182853
+generalisation,random_forest,stratified,train-test gap,0.1446669543660195,0.1013906946244951,-0.04327625974152441
+generalisation,logistic_regression,stratified,train PR-AUC,0.7590348142136272,0.7590348142136272,0.0
+generalisation,logistic_regression,stratified,OOF PR-AUC,0.7518033773765713,0.7518033773765713,0.0
+generalisation,logistic_regression,stratified,test PR-AUC,0.6825811762838582,0.6825811762838582,0.0
+generalisation,logistic_regression,stratified,train-test gap,0.076453637929769,0.076453637929769,0.0
+generalisation,xgboost,chronological,train PR-AUC,0.9995003180855644,0.8809322088883991,-0.11856810919716532
+generalisation,xgboost,chronological,OOF PR-AUC,0.7876413053003116,0.7908230159108488,0.0031817106105371806
+generalisation,xgboost,chronological,test PR-AUC,0.7944601626951692,0.7987091890166662,0.00424902632149704
+generalisation,xgboost,chronological,train-test gap,0.2050401553903953,0.0822230198717328,-0.1228171355186625
+generalisation,random_forest,chronological,train PR-AUC,0.9186076452395304,0.8509790970420035,-0.06762854819752695
+generalisation,random_forest,chronological,OOF PR-AUC,0.7763085065274248,0.7742517788286933,-0.002056727698731442
+generalisation,random_forest,chronological,test PR-AUC,0.7825817969056831,0.7664828791647399,-0.016098917740943186
+generalisation,random_forest,chronological,train-test gap,0.1360258483338474,0.0844962178772635,-0.0515296304565839
+generalisation,logistic_regression,chronological,train PR-AUC,0.7439327783265816,0.7439327783265816,0.0
+generalisation,logistic_regression,chronological,OOF PR-AUC,0.6847345431734511,0.6847345431734511,0.0
+generalisation,logistic_regression,chronological,test PR-AUC,0.737271372067696,0.737271372067696,0.0
+generalisation,logistic_regression,chronological,train-test gap,0.0066614062588855,0.0066614062588855,0.0
+cost @ EUR10,dnn,chronological,threshold,0.17,0.17,0.0
+cost @ EUR10,dnn,chronological,deployed cost EUR,3526.4399999999996,3526.4399999999996,0.0
+cost @ EUR10,dnn,chronological,caught,50,50,0
+cost @ EUR10,dnn,chronological,false alarms,2,2,0
+cost @ EUR10,logistic_regression,chronological,threshold,0.02,0.02,0.0
+cost @ EUR10,logistic_regression,chronological,deployed cost EUR,3764.74,3764.74,0.0
+cost @ EUR10,logistic_regression,chronological,caught,60,60,0
+cost @ EUR10,logistic_regression,chronological,false alarms,55,55,0
+cost @ EUR10,random_forest,chronological,threshold,0.22,0.26,0.04000000000000001
+cost @ EUR10,random_forest,chronological,deployed cost EUR,3111.67,3131.67,20.0
+cost @ EUR10,random_forest,chronological,caught,55,55,0
+cost @ EUR10,random_forest,chronological,false alarms,12,14,2
+cost @ EUR10,xgboost,chronological,threshold,0.11,0.24,0.13
+cost @ EUR10,xgboost,chronological,deployed cost EUR,3337.17,4264.540000000001,927.3700000000008
+cost @ EUR10,xgboost,chronological,caught,56,55,-1
+cost @ EUR10,xgboost,chronological,false alarms,10,8,-2
+cost @ EUR10,dnn,stratified,threshold,0.09,0.09,0.0
+cost @ EUR10,dnn,stratified,deployed cost EUR,4604.869999999999,4604.869999999999,0.0
+cost @ EUR10,dnn,stratified,caught,72,72,0
+cost @ EUR10,dnn,stratified,false alarms,8,8,0
+cost @ EUR10,logistic_regression,stratified,threshold,0.03,0.03,0.0
+cost @ EUR10,logistic_regression,stratified,deployed cost EUR,4990.27,4990.27,0.0
+cost @ EUR10,logistic_regression,stratified,caught,73,73,0
+cost @ EUR10,logistic_regression,stratified,false alarms,23,23,0
+cost @ EUR10,random_forest,stratified,threshold,0.22,0.34,0.12000000000000002
+cost @ EUR10,random_forest,stratified,deployed cost EUR,4632.5599999999995,4652.5599999999995,20.0
+cost @ EUR10,random_forest,stratified,caught,73,73,0
+cost @ EUR10,random_forest,stratified,false alarms,11,13,2
+cost @ EUR10,xgboost,stratified,threshold,0.26,0.1,-0.16
+cost @ EUR10,xgboost,stratified,deployed cost EUR,4591.6,4699.34,107.73999999999978
+cost @ EUR10,xgboost,stratified,caught,72,75,3
+cost @ EUR10,xgboost,stratified,false alarms,6,16,10
+significance,all,both,threshold tuning significant (cells),4,4,0
+drift,xgboost,6 blocks,expanding gain over static,0.021657236332474,0.01503703536664421,-0.006620200965829789
+drift,xgboost,6 blocks,blocks won,3/3,2/3,
+drift,xgboost,8 blocks,expanding gain over static,0.06216334486675083,0.024164252823925335,-0.0379990920428255
+drift,xgboost,8 blocks,blocks won,5/5,5/5,
+drift,xgboost,12 blocks,expanding gain over static,0.08597004454872675,0.03845938364146046,-0.04751066090726629
+drift,xgboost,12 blocks,blocks won,9/9,7/9,

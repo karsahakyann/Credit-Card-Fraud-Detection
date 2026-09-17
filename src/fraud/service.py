@@ -211,12 +211,7 @@ class Service:
 
 
     # ---- what-if analysis -------------------------------------------
-    WHATIF_MODELS = {
-        "xgboost": "xgboost_none_{p}.npy",
-        "random_forest": "random_forest_none_{p}.npy",
-        "logistic_regression": "logistic_regression_none_{p}.npy",
-        "dnn": "dnn_{p}.npy",
-    }
+    WHATIF_MODELS = ("xgboost", "random_forest", "logistic_regression", "dnn")
 
     def load_whatif(self) -> None:
         """Cache every model's test-set scores for instant what-if analysis.
@@ -230,10 +225,10 @@ class Service:
         explicitly a what-if panel over the whole test set, which is why it
         is kept separate rather than driving the stream.
         """
-        from . import experiment
+        from . import final_params
         self.whatif: dict[str, np.ndarray] = {}
-        for name, pattern in self.WHATIF_MODELS.items():
-            path = experiment.SCORES_DIR / pattern.format(p=self.protocol)
+        for name in self.WHATIF_MODELS:
+            path = final_params.score_file(name, self.protocol)
             if path.exists():
                 arr = np.load(path)
                 if len(arr) == len(self.replay["y"]):

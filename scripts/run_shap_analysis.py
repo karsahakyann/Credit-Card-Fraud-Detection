@@ -23,8 +23,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-import ast
-import json
 
 import matplotlib
 matplotlib.use("Agg")
@@ -32,7 +30,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-from fraud import config, data, experiment, explain, resampling
+from fraud import config, data, experiment, explain, resampling, final_params
 
 REVIEW_COST = 10.0
 SPLITTERS = {
@@ -42,17 +40,8 @@ SPLITTERS = {
 
 
 def tuned_params(protocol: str) -> dict:
-    grid = pd.read_csv(config.RESULTS_DIR / "imbalance_experiment.csv")
-    row = grid[(grid.model == "xgboost") & (grid.strategy == "none")
-               & (grid.protocol == protocol)].iloc[0]
-    raw = json.loads(row.best_params)
-    out = {}
-    for k, v in raw.items():
-        try:
-            out[k.replace("model__", "")] = ast.literal_eval(v)
-        except (ValueError, SyntaxError):
-            out[k.replace("model__", "")] = v
-    return out
+    """Final (regularised) XGBoost parameters, from the single source of truth."""
+    return final_params.params("xgboost", protocol)
 
 
 def deployed_threshold(protocol: str) -> float:
