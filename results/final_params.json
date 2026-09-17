@@ -1,0 +1,81 @@
+{
+  "_definition": "Within 1 SE of best CV PR-AUC, smallest train-CV gap. Selected on training data only; test set not read.",
+  "models": {
+    "xgboost": {
+      "stratified": {
+        "params": {
+          "subsample": 0.8,
+          "reg_lambda": 20,
+          "reg_alpha": 5,
+          "n_estimators": 300,
+          "min_child_weight": 10,
+          "max_depth": 5,
+          "learning_rate": 0.1,
+          "gamma": 0,
+          "colsample_bytree": 0.8
+        },
+        "train_pr_auc": 0.8967,
+        "cv_pr_auc": 0.8394,
+        "cv_sd": 0.0327,
+        "gap": 0.0573,
+        "phase3_gap": 0.1444,
+        "phase3_cv_pr_auc": 0.8517,
+        "selected_from": "search 18"
+      },
+      "chronological": {
+        "params": {
+          "subsample": 0.6,
+          "reg_lambda": 5,
+          "reg_alpha": 0,
+          "n_estimators": 200,
+          "min_child_weight": 5,
+          "max_depth": 4,
+          "learning_rate": 0.03,
+          "gamma": 0.5,
+          "colsample_bytree": 0.6
+        },
+        "train_pr_auc": 0.8809,
+        "cv_pr_auc": 0.8036,
+        "cv_sd": 0.0176,
+        "gap": 0.0773,
+        "phase3_gap": 0.1906,
+        "phase3_cv_pr_auc": 0.8089,
+        "selected_from": "search 10"
+      }
+    },
+    "random_forest": {
+      "stratified": {
+        "params": {
+          "n_estimators": 200,
+          "min_samples_leaf": 10,
+          "max_samples": 0.5,
+          "max_features": 0.5,
+          "max_depth": 8
+        },
+        "train_pr_auc": 0.8892,
+        "cv_pr_auc": 0.8229,
+        "cv_sd": 0.0399,
+        "gap": 0.0662,
+        "phase3_gap": 0.0951,
+        "phase3_cv_pr_auc": 0.8362,
+        "selected_from": "search 09"
+      },
+      "chronological": {
+        "params": {
+          "n_estimators": 100,
+          "min_samples_leaf": 20,
+          "max_samples": null,
+          "max_features": 0.3,
+          "max_depth": 6
+        },
+        "train_pr_auc": 0.851,
+        "cv_pr_auc": 0.7891,
+        "cv_sd": 0.031,
+        "gap": 0.0619,
+        "phase3_gap": 0.1266,
+        "phase3_cv_pr_auc": 0.792,
+        "selected_from": "search 12"
+      }
+    }
+  }
+}
