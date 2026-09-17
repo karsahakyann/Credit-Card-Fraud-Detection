@@ -1,0 +1,735 @@
+"""FastAPI scoring service and live demo (demo layer).
+
+Serves the model this dissertation recommends, at the threshold its own
+cost analysis selected, explaining each alert with the SHAP machinery from
+Phase 5. Nothing here invents new modelling: it deploys the result.
+
+Endpoints
+---------
+``GET  /``            dashboard
+``POST /score``       score one transaction
+``GET  /replay/...``  drive a replay of the held-out test set
+``GET  /stats``       running tallies and live cost
+``GET  /alerts``      recent alerts from the in-memory inbox
+``GET  /health``      readiness, including whether Telegram is configured
+
+The replay streams the **held-out test set**, which the model never saw in
+training, so the demo is a real evaluation rather than a re-run of training
+data.
+
+Run:
+    ./venv/bin/uvicorn fraud.service:app --app-dir src --reload
+"""
+
+from __future__ import annotations
+
+import threading
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any
+
+import joblib
+import numpy as np
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse
+from pydantic import BaseModel, Field
+
+from . import config
+from .alerts import Alert, InMemoryNotifier, build_default_notifier
+
+MODEL_DIR = config.PROJECT_ROOT / "models"
+DEFAULT_PROTOCOL = "chronological"      # the deployment-realistic one
+
+
+class ScoreRequest(BaseModel):
+    features: list[float] = Field(..., description="Feature vector, model column order")
+    transaction_id: int | None = None
+    notify: bool = True
+
+
+class ScoreResponse(BaseModel):
+    transaction_id: int
+    probability: float
+    threshold: float
+    flagged: bool
+    amount: float
+    reasons: list[tuple[str, float]]
+    notified: bool
+
+
+class ReplayState:
+    """Cursor and tallies for the replay, guarded for concurrent requests."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.reset()
+
+    def reset(self) -> None:
+        self.cursor = 0
+        self.tp = self.fp = self.fn = self.tn = 0
+        self.fn_loss = 0.0
+        self.review_cost_total = 0.0
+        self.processed = 0
+
+
+class Service:
+    """Holds the loaded model, replay data and notifier."""
+
+    def __init__(self, protocol: str = DEFAULT_PROTOCOL) -> None:
+        self.protocol = protocol
+        self.bundle: dict[str, Any] | None = None
+        self.replay: dict[str, Any] | None = None
+        self.state = ReplayState()
+        self._threshold_override: float | None = None
+        self.feedback: dict[int, str] = {}      # analyst verdicts from Telegram
+        self.controller = None
+        self.notifier = build_default_notifier()
+        self.inbox: InMemoryNotifier = next(
+            b for b in self.notifier.backends if isinstance(b, InMemoryNotifier)
+        )
+        self._explainer = None
+
+    # -- loading ---------------------------------------------------------
+    def available_models(self) -> list[str]:
+        """Model keys with a persisted artefact for the current protocol."""
+        found = []
+        for path in sorted(MODEL_DIR.glob(f"final_{self.protocol}_*.joblib")):
+            found.append(path.stem.replace(f"final_{self.protocol}_", ""))
+        return found
+
+    def load(self, model_key: str | None = None) -> None:
+        if model_key:
+            model_path = MODEL_DIR / f"final_{self.protocol}_{model_key}.joblib"
+            if not model_path.exists():
+                raise FileNotFoundError(
+                    f"No artefact for {model_key!r}. Available: "
+                    f"{self.available_models()}")
+        else:
+            model_path = MODEL_DIR / f"final_{self.protocol}.joblib"
+        replay_path = MODEL_DIR / f"replay_{self.protocol}.npz"
+        if not model_path.exists() or not replay_path.exists():
+            raise FileNotFoundError(
+                f"Missing {model_path.name} / {replay_path.name}. "
+                "Run: ./venv/bin/python scripts/train_final_model.py"
+            )
+        self.bundle = joblib.load(model_path)
+        self.model_key = self.bundle.get("model_key", "xgboost")
+        self._explainer = None            # explainer is model-specific
+        self._threshold_override = None   # each model has its own tuned value
+        z = np.load(replay_path, allow_pickle=True)
+        self.replay = {
+            "X": z["X"], "y": z["y"], "amounts": z["amounts"],
+            "columns": [str(c) for c in z["columns"]],
+        }
+        self.state.reset()
+        self.load_whatif()
+
+    @property
+    def ready(self) -> bool:
+        return self.bundle is not None and self.replay is not None
+
+    @property
+    def threshold(self) -> float:
+        if self._threshold_override is not None:
+            return float(self._threshold_override)
+        return float(self.bundle["threshold"]) if self.bundle else float("nan")
+
+    def set_threshold(self, value: float) -> float:
+        """Override the deployed threshold at runtime (Telegram / dashboard).
+
+        The tuned value from Phase 5 stays in the bundle, so reset_threshold
+        always returns to the figure the cost analysis actually selected.
+        """
+        if not 0.0 <= value <= 1.0:
+            raise ValueError("threshold must be between 0 and 1")
+        self._threshold_override = float(value)
+        return self.threshold
+
+    def reset_threshold(self) -> float:
+        self._threshold_override = None
+        return self.threshold
+
+    # -- scoring ---------------------------------------------------------
+    def _explain(self, x: np.ndarray, top_n: int = 3) -> list[tuple[str, float]]:
+        """Top SHAP drivers for one row; degrades to [] if shap is absent."""
+        try:
+            import shap
+
+            pipe = self.bundle["pipeline"]
+            if not hasattr(pipe, "steps"):
+                return []           # only pipelined tree models are explained
+            if self._explainer is None:
+                self._explainer = shap.TreeExplainer(pipe.steps[-1][1])
+            import pandas as pd
+            xt = pd.DataFrame(x.reshape(1, -1),
+                              columns=self.bundle["feature_names"])
+            for _, step in pipe.steps[:-1]:
+                xt = step.transform(xt)
+            values = self._explainer.shap_values(np.asarray(xt, dtype=float))
+            if isinstance(values, list):
+                values = values[1] if len(values) > 1 else values[0]
+            row = np.asarray(values).ravel()
+            names = self.bundle["feature_names"]
+            order = np.argsort(-np.abs(row))[:top_n]
+            return [(names[i], float(row[i])) for i in order]
+        except Exception:                                    # noqa: BLE001
+            return []
+
+    def score_row(
+        self, x: np.ndarray, transaction_id: int, notify: bool = True,
+    ) -> ScoreResponse:
+        pipe = self.bundle["pipeline"]
+        names = self.bundle["feature_names"]
+        # Score through a named frame. The pipeline was fitted on a DataFrame,
+        # so passing a bare array makes scikit-learn warn about missing
+        # feature names on every single call -- thousands of warnings across a
+        # replay, and a real risk of silently mismatched column order.
+        import pandas as pd
+        if self.bundle.get("needs_float32"):
+            row = x.reshape(1, -1).astype(np.float32)
+        else:
+            row = pd.DataFrame(x.reshape(1, -1), columns=names)
+        prob = float(pipe.predict_proba(row)[0, 1])
+        flagged = prob >= self.threshold
+        amount = float(x[names.index("Amount")]) if "Amount" in names else 0.0
+
+        reasons: list[tuple[str, float]] = []
+        notified = False
+        if flagged:
+            reasons = self._explain(x)
+            if notify:
+                notified = self.notifier.send(Alert(
+                    transaction_id=transaction_id, amount=amount,
+                    probability=prob, threshold=self.threshold,
+                    model=self.bundle["model_name"], reasons=reasons,
+                ))
+        return ScoreResponse(
+            transaction_id=transaction_id, probability=prob,
+            threshold=self.threshold, flagged=flagged, amount=amount,
+            reasons=reasons, notified=notified,
+        )
+
+
+    # ---- what-if analysis -------------------------------------------
+    WHATIF_MODELS = {
+        "xgboost": "xgboost_none_{p}.npy",
+        "random_forest": "random_forest_none_{p}.npy",
+        "logistic_regression": "logistic_regression_none_{p}.npy",
+        "dnn": "dnn_{p}.npy",
+    }
+
+    def load_whatif(self) -> None:
+        """Cache every model's test-set scores for instant what-if analysis.
+
+        These are the score files Phases 2 and 3 saved: the same models on
+        the same held-out rows the live stream replays. Caching them lets the
+        threshold slider and the model switcher recompute a full confusion
+        matrix and cost in microseconds, instead of refitting anything.
+
+        The live stream still scores through the real pipeline. This path is
+        explicitly a what-if panel over the whole test set, which is why it
+        is kept separate rather than driving the stream.
+        """
+        from . import experiment
+        self.whatif: dict[str, np.ndarray] = {}
+        for name, pattern in self.WHATIF_MODELS.items():
+            path = experiment.SCORES_DIR / pattern.format(p=self.protocol)
+            if path.exists():
+                arr = np.load(path)
+                if len(arr) == len(self.replay["y"]):
+                    self.whatif[name] = arr
+
+    def whatif_eval(self, model: str, threshold: float) -> dict:
+        """Confusion matrix and cost for one (model, threshold), instantly."""
+        if model not in self.whatif:
+            raise KeyError(model)
+        scores = self.whatif[model]
+        y = np.asarray(self.replay["y"]).astype(bool)
+        amounts = np.asarray(self.replay["amounts"], dtype=float)
+        flagged = scores >= threshold
+        tp = int(np.sum(y & flagged)); fp = int(np.sum(~y & flagged))
+        fn = int(np.sum(y & ~flagged)); tn = int(np.sum(~y & ~flagged))
+        review = float(self.bundle["review_cost"]) * (tp + fp)
+        loss = float(amounts[y & ~flagged].sum())
+        no_model = float(amounts[y].sum())
+        return {
+            "model": model, "threshold": round(threshold, 3),
+            "tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "precision": (tp / (tp + fp)) if (tp + fp) else None,
+            "recall": (tp / (tp + fn)) if (tp + fn) else None,
+            "review_cost": round(review, 2),
+            "money_lost": round(loss, 2),
+            "total_cost": round(review + loss, 2),
+            "baseline_cost": round(no_model, 2),
+            "saved_vs_baseline": round(no_model - (review + loss), 2),
+        }
+
+
+svc = Service()
+
+
+def _start_controller() -> None:
+    """Attach Telegram's return path: inline buttons and slash commands."""
+    import os
+    from .alerts import TelegramNotifier, load_dotenv
+    from .telegram_control import TelegramController, build_alert_keyboard
+
+    load_dotenv()
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+    if not (token and chat_id):
+        return
+
+    # attach the inline keyboard to outgoing alerts
+    for backend in svc.notifier.backends:
+        inner = getattr(backend, "backend", backend)
+        if isinstance(inner, TelegramNotifier):
+            inner.keyboard_factory = build_alert_keyboard
+
+    def h_stats() -> str:
+        s = stats()
+        return (f"Replay: {s['processed']:,} processed\n"
+                f"caught {s['tp']} / missed {s['fn']} / false alarms {s['fp']}\n"
+                f"precision {s['precision'] or 0:.3f}  recall {s['recall'] or 0:.3f}\n"
+                f"lost EUR {s['money_lost']:,.0f}  total cost EUR {s['total_cost']:,.0f}\n"
+                f"threshold {s['threshold']:.2f}")
+
+    def h_get_threshold() -> str:
+        return (f"Current threshold {svc.threshold:.2f} "
+                f"(Phase 5 tuned value: {float(svc.bundle['threshold']):.2f})")
+
+    def h_set_threshold(v: float) -> str:
+        svc.set_threshold(v)
+        r = svc.whatif_eval("xgboost", v)
+        return (f"Threshold set to {v:.2f}\n"
+                f"Over the full test set that would catch {r['tp']}/{r['tp']+r['fn']} "
+                f"frauds with {r['fp']} false alarms,\n"
+                f"costing EUR {r['total_cost']:,.0f} "
+                f"(saving EUR {r['saved_vs_baseline']:,.0f} vs doing nothing).")
+
+    def h_models() -> str:
+        rows = models()["models"]
+        return "Comparable models:\n" + "\n".join(
+            f"  {m['model']} (tuned {m['tuned_threshold']})" for m in rows)
+
+    def h_whatif(model: str, thr: float | None) -> str:
+        if model not in svc.whatif:
+            return f"Unknown model. Try: {', '.join(sorted(svc.whatif))}"
+        t = svc.threshold if thr is None else thr
+        r = svc.whatif_eval(model, t)
+        return (f"{model} at threshold {r['threshold']}\n"
+                f"caught {r['tp']}/{r['tp']+r['fn']}  false alarms {r['fp']}\n"
+                f"precision {r['precision'] or 0:.3f}  recall {r['recall'] or 0:.3f}\n"
+                f"total cost EUR {r['total_cost']:,.0f}")
+
+    def h_feedback(tid: int, disposition: str) -> str:
+        """Record a workflow action. Deliberately does not reveal the label.
+
+        An analyst does not learn whether an alert was fraud at the moment
+        they triage it; the answer arrives later, with a chargeback or a
+        customer call. Revealing it here would make the demo a quiz on
+        anonymised PCA components, which no human can read. Outcomes are
+        released in aggregate by /review instead.
+        """
+        svc.feedback[tid] = disposition
+        action = "escalated for investigation" if disposition == "escalate" \
+            else "dismissed"
+        n = len(svc.feedback)
+        return (f"Transaction {tid} {action}.\n"
+                f"{n} case(s) triaged this session. "
+                f"Send /review to see how the queue turned out.")
+
+    def h_review() -> str:
+        """Release the outcomes, the way delayed labels arrive in practice."""
+        if not svc.feedback:
+            return ("No cases triaged yet. Escalate or dismiss a few alerts "
+                    "first, then send /review.")
+        esc_right = esc_wrong = dis_right = dis_wrong = 0
+        missed_value = 0.0
+        for tid, disp in svc.feedback.items():
+            try:
+                truth = bool(svc.replay["y"][tid])
+                amount = float(svc.replay["amounts"][tid])
+            except Exception:                                  # noqa: BLE001
+                continue
+            if disp == "escalate":
+                esc_right += truth; esc_wrong += not truth
+            else:
+                dis_wrong += truth; dis_right += not truth
+                if truth:
+                    missed_value += amount
+        total = esc_right + esc_wrong + dis_right + dis_wrong
+        if not total:
+            return "No triaged cases could be matched to outcomes."
+        was = lambda n: "was" if n == 1 else "were"        # noqa: E731
+        lines = [
+            f"Review of {total} triaged case{'' if total == 1 else 's'}",
+            "",
+            f"Escalated: {esc_right + esc_wrong}"
+            f"  ({esc_right} {was(esc_right)} fraud, "
+            f"{esc_wrong} {was(esc_wrong)} not)",
+            f"Dismissed: {dis_right + dis_wrong}"
+            f"  ({dis_right} {was(dis_right)} fine, "
+            f"{dis_wrong} {was(dis_wrong)} fraud)",
+        ]
+        if esc_right + esc_wrong:
+            lines.append(f"Your escalation precision: "
+                         f"{esc_right / (esc_right + esc_wrong):.2f}")
+        if dis_wrong:
+            lines.append(f"Value dismissed in error: EUR {missed_value:,.2f}")
+        lines += [
+            "",
+            "Note: V1-V28 are anonymised PCA components, so a human cannot",
+            "read them. Any accuracy here is close to chance -- which is the",
+            "point. The model reaches 0.85 precision on features nobody can",
+            "interpret.",
+        ]
+        return "\n".join(lines)
+
+    def h_explain(tid: int) -> str:
+        try:
+            x = svc.replay["X"][tid]
+        except Exception:                                      # noqa: BLE001
+            return f"Transaction {tid} is not in the replay."
+        reasons = svc._explain(x, top_n=5)
+        if not reasons:
+            return "No explanation available."
+        lines = [f"Why transaction {tid} was flagged:"]
+        for feat, val in reasons:
+            lines.append(f"  {feat}: {val:+.2f} "
+                         f"{'toward fraud' if val > 0 else 'toward legitimate'}")
+        return "\n".join(lines)
+
+    ctrl = TelegramController(token, chat_id, {
+        "stats": h_stats, "review": h_review, "get_threshold": h_get_threshold,
+        "set_threshold": h_set_threshold, "models": h_models,
+        "whatif": h_whatif, "feedback": h_feedback, "explain": h_explain,
+    })
+    if ctrl.start():
+        svc.controller = ctrl
+        print("[startup] Telegram controller listening for commands")
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Load the model at startup. on_event is deprecated in current FastAPI."""
+    try:
+        svc.load()
+    except FileNotFoundError as exc:
+        print(f"[startup] {exc}")
+    try:
+        _start_controller()
+    except Exception as exc:                                   # noqa: BLE001
+        print(f"[startup] Telegram controller unavailable: {type(exc).__name__}")
+    yield
+    if svc.controller is not None:
+        svc.controller.stop()
+
+
+app = FastAPI(lifespan=lifespan,
+              title="Fraud Detection Demo",
+              description="Serving the dissertation's final model at its "
+                          "cost-optimal threshold.",
+              version="1.0")
+
+
+@app.get("/health")
+def health() -> dict:
+    return {
+        "ready": svc.ready,
+        "protocol": svc.protocol,
+        "model": svc.bundle["model_name"] if svc.ready else None,
+        "model_key": getattr(svc, "model_key", None),
+        "threshold": svc.threshold if svc.ready else None,
+        "notifiers": svc.notifier.status(),
+        # Configured is not the same as working: surface the last delivery
+        # outcome and any error so a silently failing backend is visible
+        # rather than hiding behind a green pill.
+        "last_delivery": svc.notifier.last_results or None,
+        "notifier_errors": svc.notifier.errors() or None,
+        "replay_size": len(svc.replay["y"]) if svc.ready else 0,
+    }
+
+
+@app.post("/score", response_model=ScoreResponse)
+def score(req: ScoreRequest) -> ScoreResponse:
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded; run scripts/train_final_model.py")
+    expected = len(svc.bundle["feature_names"])
+    if len(req.features) != expected:
+        raise HTTPException(
+            422, f"Expected {expected} features, got {len(req.features)}")
+    tid = req.transaction_id if req.transaction_id is not None else -1
+    return svc.score_row(np.asarray(req.features, dtype=float), tid, req.notify)
+
+
+@app.post("/replay/reset")
+def replay_reset() -> dict:
+    svc.state.reset()
+    svc.inbox.clear()
+    return {"ok": True}
+
+
+@app.get("/replay/next")
+def replay_next(n: int = 1, notify: bool = True) -> dict:
+    """Score the next n held-out transactions and update running tallies."""
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    X, y, amounts = svc.replay["X"], svc.replay["y"], svc.replay["amounts"]
+    out = []
+    with svc.state.lock:
+        for _ in range(max(1, min(n, 200))):
+            i = svc.state.cursor
+            if i >= len(y):
+                break
+            res = svc.score_row(X[i], transaction_id=int(i), notify=notify)
+            actual = int(y[i])
+            if res.flagged and actual == 1:
+                svc.state.tp += 1
+            elif res.flagged and actual == 0:
+                svc.state.fp += 1
+            elif not res.flagged and actual == 1:
+                svc.state.fn += 1
+                svc.state.fn_loss += float(amounts[i])
+            else:
+                svc.state.tn += 1
+            if res.flagged:
+                svc.state.review_cost_total += float(svc.bundle["review_cost"])
+            svc.state.processed += 1
+            svc.state.cursor += 1
+            out.append({"transaction_id": int(i), "probability": res.probability,
+                        "amount": res.amount, "flagged": res.flagged,
+                        "actual_fraud": actual == 1})
+    return {"scored": out, "stats": stats()}
+
+
+@app.get("/replay/skip_to_fraud")
+def replay_skip_to_fraud(max_scan: int = 6000, notify: bool = True,
+                         stop_on: str = "alert") -> dict:
+    """Fast-forward past uneventful traffic, scoring everything on the way.
+
+    Fraud is 0.13% of this stream: the first one sits about 1,900
+    transactions in, and the widest gap is over 4,000. A live audience
+    should not watch a minute of blank screen waiting for that.
+
+    Two stopping rules, and the difference matters when presenting:
+
+    ``stop_on="alert"`` (default)
+        Stop when *the model* flags a transaction. Uses no ground-truth
+        labels whatsoever, so it is exactly what a production system would
+        do while watching a live feed. Defensible without caveat.
+    ``stop_on="fraud"``
+        Stop at the next transaction that is truly fraudulent, whether the
+        model caught it or not. This reads the label, so it is a
+        presentation convenience rather than a live-system behaviour -- but
+        it is the only way to *show* a miss, which is worth demonstrating
+        honestly rather than hiding.
+
+    In neither mode does the model see a label: score_row receives features
+    only. The label, when used at all, decides where the display pauses,
+    never what the model predicts.
+
+    Every skipped transaction is still scored and still counted, so
+    precision, recall and cost are exactly what a full replay produces.
+    Only the per-row rendering is suppressed.
+    """
+    if stop_on not in ("alert", "fraud"):
+        raise HTTPException(422, "stop_on must be 'alert' or 'fraud'")
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    X, y, amounts = svc.replay["X"], svc.replay["y"], svc.replay["amounts"]
+    shown, skipped = [], 0
+    with svc.state.lock:
+        for _ in range(max(1, min(max_scan, 20000))):
+            i = svc.state.cursor
+            if i >= len(y):
+                break
+            actual = int(y[i])
+            res = svc.score_row(X[i], transaction_id=int(i), notify=notify)
+            if res.flagged and actual == 1:
+                svc.state.tp += 1
+            elif res.flagged and actual == 0:
+                svc.state.fp += 1
+            elif not res.flagged and actual == 1:
+                svc.state.fn += 1
+                svc.state.fn_loss += float(amounts[i])
+            else:
+                svc.state.tn += 1
+            if res.flagged:
+                svc.state.review_cost_total += float(svc.bundle["review_cost"])
+            svc.state.processed += 1
+            svc.state.cursor += 1
+
+            interesting = res.flagged or (stop_on == "fraud" and actual == 1)
+            if interesting:
+                shown.append({"transaction_id": int(i),
+                              "probability": res.probability,
+                              "amount": res.amount, "flagged": res.flagged,
+                              "actual_fraud": actual == 1})
+                should_stop = (res.flagged if stop_on == "alert"
+                               else actual == 1)
+                if should_stop:
+                    break
+            else:
+                skipped += 1
+    return {"scored": shown, "skipped": skipped,
+            "stop_on": stop_on, "stats": stats()}
+
+
+@app.get("/stats")
+def stats() -> dict:
+    s = svc.state
+    caught = s.tp
+    total_fraud = s.tp + s.fn
+    return {
+        "processed": s.processed,
+        "remaining": (len(svc.replay["y"]) - s.cursor) if svc.ready else 0,
+        "tp": s.tp, "fp": s.fp, "fn": s.fn, "tn": s.tn,
+        "precision": (s.tp / (s.tp + s.fp)) if (s.tp + s.fp) else None,
+        "recall": (caught / total_fraud) if total_fraud else None,
+        "fraud_seen": total_fraud,
+        "money_lost": round(s.fn_loss, 2),
+        "review_cost": round(s.review_cost_total, 2),
+        "total_cost": round(s.fn_loss + s.review_cost_total, 2),
+        "threshold": svc.threshold if svc.ready else None,
+    }
+
+
+@app.post("/threshold")
+def set_threshold(value: float) -> dict:
+    """Re-threshold the running service (dashboard slider / Telegram)."""
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    try:
+        svc.set_threshold(value)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"threshold": svc.threshold,
+            "tuned_threshold": float(svc.bundle["threshold"])}
+
+
+@app.post("/threshold/reset")
+def reset_threshold() -> dict:
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    return {"threshold": svc.reset_threshold()}
+
+
+@app.get("/feedback")
+def feedback(reveal: bool = False) -> dict:
+    """Triage dispositions collected from Telegram.
+
+    Outcomes are withheld by default, mirroring the delay before a chargeback
+    or customer confirmation establishes the truth. Pass reveal=true for the
+    end-of-session summary.
+    """
+    rows = []
+    for tid, disposition in list(svc.feedback.items())[-50:]:
+        row = {"transaction_id": tid, "disposition": disposition}
+        if reveal:
+            try:
+                row["actual_fraud"] = bool(svc.replay["y"][tid])
+            except Exception:                                  # noqa: BLE001
+                row["actual_fraud"] = None
+        rows.append(row)
+    out = {"count": len(svc.feedback), "revealed": reveal, "recent": rows}
+    if reveal:
+        esc = [r for r in rows if r["disposition"] == "escalate"]
+        hits = [r for r in esc if r.get("actual_fraud")]
+        out["escalated"] = len(esc)
+        out["escalated_were_fraud"] = len(hits)
+    return out
+
+
+@app.get("/whatif")
+def whatif(model: str = "xgboost", threshold: float | None = None) -> dict:
+    """Re-threshold or swap model instantly, over the whole test set."""
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    if model not in svc.whatif:
+        raise HTTPException(
+            422, f"Unknown model {model!r}; have {sorted(svc.whatif)}")
+    t = svc.threshold if threshold is None else float(threshold)
+    if not 0.0 <= t <= 1.0:
+        raise HTTPException(422, "threshold must be between 0 and 1")
+    return svc.whatif_eval(model, t)
+
+
+@app.get("/whatif/curve")
+def whatif_curve(model: str = "xgboost", steps: int = 50) -> dict:
+    """Cost and recall across the threshold range, for plotting the slider."""
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    if model not in svc.whatif:
+        raise HTTPException(422, f"Unknown model {model!r}")
+    pts = []
+    for t in np.linspace(0.01, 0.99, max(5, min(steps, 200))):
+        r = svc.whatif_eval(model, float(t))
+        pts.append({"threshold": round(float(t), 3),
+                    "total_cost": r["total_cost"],
+                    "recall": r["recall"], "precision": r["precision"]})
+    best = min(pts, key=lambda r: r["total_cost"])
+    return {"model": model, "points": pts, "best": best,
+            "deployed_threshold": svc.threshold}
+
+
+@app.post("/model")
+def switch_model(name: str) -> dict:
+    """Swap the live scoring model without restarting the service.
+
+    Reloads the persisted artefact for that model and resets the replay, so
+    the run that follows is a clean evaluation by the new model rather than
+    a mixture of two. Each model carries its own cost-optimal threshold, so
+    switching restores that too.
+    """
+    if not svc.ready:
+        raise HTTPException(503, "Model not loaded")
+    available = svc.available_models()
+    if name not in available:
+        raise HTTPException(
+            422, f"No artefact for {name!r}. Available: {available}. "
+                 "Run scripts/train_final_model.py to build more.")
+    try:
+        svc.load(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    svc.inbox.clear()
+    return {"model": svc.bundle["model_name"], "model_key": svc.model_key,
+            "threshold": svc.threshold, "protocol": svc.protocol}
+
+
+@app.get("/models")
+def models() -> dict:
+    """Which models the what-if panel can compare, and their tuned thresholds."""
+    import pandas as pd
+    out = []
+    try:
+        sel = pd.read_csv(config.RESULTS_DIR / "threshold_selection.csv")
+        sel = sel[(sel.protocol == svc.protocol) & (sel.review_cost == 10.0)]
+        tuned = dict(zip(sel.model, sel.threshold_selected_on_train))
+    except Exception:                                          # noqa: BLE001
+        tuned = {}
+    for name in sorted(svc.whatif):
+        out.append({"model": name,
+                    "tuned_threshold": round(float(tuned.get(name, 0.5)), 3)})
+    live = set(svc.available_models())
+    for row in out:
+        row["can_serve_live"] = row["model"] in live
+    return {"models": out, "protocol": svc.protocol,
+            "current": getattr(svc, "model_key", None),
+            "live_models": sorted(live)}
+
+
+@app.get("/alerts")
+def alerts(limit: int = 15) -> dict:
+    return {"alerts": [
+        {"transaction_id": a.transaction_id, "amount": a.amount,
+         "probability": a.probability, "timestamp": a.timestamp,
+         "reasons": a.reasons, "text": a.as_text()}
+        for a in svc.inbox.recent(limit)
+    ]}
+
+
+@app.get("/", response_class=HTMLResponse)
+def dashboard() -> str:
+    return (Path(__file__).parent / "dashboard.html").read_text()

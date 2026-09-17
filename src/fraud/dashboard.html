@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Fraud Detection Console</title>
+<style>
+  :root{
+    --bg:#f6f7f9; --surface:#fff; --line:#e4e7ec; --line-strong:#d0d5dd;
+    --ink:#101828; --ink-2:#475467; --ink-3:#98a2b3;
+    --accent:#175cd3; --accent-soft:#eff4ff;
+    --danger:#b42318; --danger-soft:#fef3f2;
+    --warn:#b54708; --success:#067647;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .num{font-variant-numeric:tabular-nums;font-feature-settings:"tnum"}
+
+  header{background:var(--surface);border-bottom:1px solid var(--line);
+    padding:0 20px;height:52px;display:flex;align-items:center;gap:14px}
+  header h1{font-size:14px;font-weight:600;margin:0;letter-spacing:-.01em}
+  .meta{color:var(--ink-2);font-size:12px}
+  .dot{width:5px;height:5px;border-radius:50%;background:var(--ink-3);display:inline-block;
+    margin:0 8px;vertical-align:middle}
+  .tag{font-size:11px;padding:2px 7px;border-radius:4px;border:1px solid var(--line-strong);
+    color:var(--ink-2);background:var(--surface);font-weight:500}
+  .tag.live{color:var(--success);border-color:#a9dfc0;background:#f0fdf4}
+  .tag.off{color:var(--ink-3)}
+  .tag.err{color:var(--danger);border-color:#f2b8b5;background:var(--danger-soft)}
+
+  main{padding:16px 20px;display:grid;grid-template-columns:minmax(0,1fr) 340px;gap:16px}
+  @media(max-width:1080px){main{grid-template-columns:1fr}}
+  section{background:var(--surface);border:1px solid var(--line);border-radius:6px}
+  .sec-head{padding:11px 14px;border-bottom:1px solid var(--line);display:flex;
+    align-items:center;justify-content:space-between;gap:10px}
+  .sec-head h2{font-size:12px;font-weight:600;margin:0;letter-spacing:.01em}
+  .sec-head .note{font-size:11px;color:var(--ink-3)}
+  .pad{padding:14px}
+
+  button{font:inherit;font-size:12px;font-weight:500;padding:6px 11px;border-radius:5px;
+    border:1px solid var(--line-strong);background:var(--surface);color:var(--ink);cursor:pointer}
+  button:hover:not(:disabled){background:#f9fafb}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.primary:hover:not(:disabled){background:#1349ad}
+  button:disabled{opacity:.45;cursor:default}
+  .bar{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+
+  .kpis{display:grid;grid-template-columns:repeat(4,1fr);border-top:1px solid var(--line)}
+  .kpi{padding:12px 14px;border-right:1px solid var(--line)}
+  .kpi:last-child{border-right:0}
+  .kpi .l{font-size:11px;color:var(--ink-2);margin-bottom:3px}
+  .kpi .v{font-size:19px;font-weight:600;letter-spacing:-.02em}
+  .kpi .v.danger{color:var(--danger)} .kpi .v.warn{color:var(--warn)}
+  .kpi .s{font-size:11px;color:var(--ink-3);margin-top:1px}
+
+  table{width:100%;border-collapse:collapse}
+  th{font-size:11px;font-weight:600;color:var(--ink-2);text-align:left;
+    padding:8px 14px;border-bottom:1px solid var(--line);background:#fbfcfd;
+    position:sticky;top:0}
+  td{padding:7px 14px;border-bottom:1px solid #f0f2f5;font-size:12.5px}
+  tbody tr:hover{background:#fbfcfd}
+  td.r,th.r{text-align:right}
+  .flag{color:var(--danger);font-weight:600}
+  .pass{color:var(--ink-3)}
+  .fraud{color:var(--danger);font-weight:600}
+  .legit{color:var(--ink-3)}
+  .scroll{max-height:320px;overflow:auto}
+
+  .alert{padding:11px 14px;border-bottom:1px solid var(--line)}
+  .alert:last-child{border-bottom:0}
+  .alert .top{display:flex;justify-content:space-between;align-items:baseline;gap:8px}
+  .alert .amt{font-weight:600;font-size:13px}
+  .alert .p{font-size:11px;color:var(--ink-2)}
+  .alert .why{margin-top:5px;font-size:11px;color:var(--ink-2);
+    font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+  .empty{padding:24px 14px;text-align:center;color:var(--ink-3);font-size:12px}
+  .track{height:3px;background:var(--line);border-radius:2px;overflow:hidden}
+  .track>i{display:block;height:100%;background:var(--accent);width:0}
+  .best{background:var(--accent-soft)}
+</style>
+</head>
+<body>
+<header>
+  <h1>Fraud Detection Console</h1>
+  <span class="meta" id="meta">loading</span>
+  <span style="flex:1"></span>
+  <label class="meta" for="modelsel" style="margin-right:-6px">Model</label>
+  <select id="modelsel" style="font:inherit;font-size:12px;padding:4px 8px;
+    border:1px solid var(--line-strong);border-radius:5px;background:var(--surface);
+    color:var(--ink)"></select>
+  <span class="tag" id="t-proto">—</span>
+  <span class="tag" id="t-tg">telegram</span>
+</header>
+
+<main>
+  <div>
+    <section style="margin-bottom:16px">
+      <div class="sec-head">
+        <h2>Replay &mdash; held-out transactions</h2>
+        <span class="note" id="progress-note">not started</span>
+      </div>
+      <div class="pad">
+        <div class="bar" style="margin-bottom:11px">
+          <button class="primary" id="start">Start</button>
+          <button id="pause" disabled>Pause</button>
+          <button id="step">Step 25</button>
+          <button id="skip">Next alert</button>
+          <button id="skipfraud">Next fraud</button>
+          <button id="reset">Reset</button>
+        </div>
+        <div class="track"><i id="prog"></i></div>
+      </div>
+      <div class="kpis">
+        <div class="kpi"><div class="l">Processed</div><div class="v num" id="k-proc">0</div>
+          <div class="s" id="k-remain">&nbsp;</div></div>
+        <div class="kpi"><div class="l">Fraud caught</div><div class="v num" id="k-tp">0</div>
+          <div class="s" id="k-rec">&nbsp;</div></div>
+        <div class="kpi"><div class="l">Fraud missed</div><div class="v num warn" id="k-fn">0</div>
+          <div class="s" id="k-lost">&nbsp;</div></div>
+        <div class="kpi"><div class="l">False alarms</div><div class="v num" id="k-fp">0</div>
+          <div class="s" id="k-prec">&nbsp;</div></div>
+      </div>
+    </section>
+
+    <section style="margin-bottom:16px">
+      <div class="sec-head">
+        <h2>Model comparison</h2>
+        <span class="note">each at its cost-optimal threshold, over all held-out transactions</span>
+      </div>
+      <table>
+        <thead><tr>
+          <th>Model</th><th class="r">Threshold</th><th class="r">Caught</th>
+          <th class="r">Missed</th><th class="r">False alarms</th>
+          <th class="r">Precision</th><th class="r">Recall</th><th class="r">Cost</th>
+        </tr></thead>
+        <tbody id="cmp"><tr><td colspan="8" class="empty">loading</td></tr></tbody>
+      </table>
+    </section>
+
+    <section>
+      <div class="sec-head"><h2>Transaction stream</h2></div>
+      <div class="scroll">
+        <table>
+          <thead><tr>
+            <th>ID</th><th class="r">Amount</th><th class="r">P(fraud)</th>
+            <th>Decision</th><th>Outcome</th>
+          </tr></thead>
+          <tbody id="stream"><tr><td colspan="5" class="empty">Live tail &mdash; press Start or Step to populate</td></tr></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <section>
+    <div class="sec-head"><h2>Alerts</h2><span class="note" id="alert-count">0</span></div>
+    <div class="scroll" id="alerts" style="max-height:640px">
+      <div class="empty">No alerts yet</div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const eur = v => "€" + (v ?? 0).toLocaleString(undefined,{maximumFractionDigits:0});
+const eur2 = v => "€" + (v ?? 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2});
+let timer=null, streamRows=0;
+
+async function health(){
+  const h = await (await fetch("/health")).json();
+  $("meta").innerHTML = h.ready
+    ? `${h.model}<span class="dot"></span>threshold ${h.threshold.toFixed(2)}<span class="dot"></span>${h.replay_size.toLocaleString()} transactions`
+    : "model not loaded — run scripts/train_final_model.py";
+  $("t-proto").textContent = h.protocol;
+  const tg=$("t-tg"), on=h.notifiers&&h.notifiers.telegram,
+        err=h.notifier_errors&&h.notifier_errors.telegram,
+        sent=h.last_delivery&&h.last_delivery.telegram;
+  tg.textContent = "telegram " + (err?"error":on?(sent?"sending":"ready"):"off");
+  tg.className = "tag " + (err?"err":on?"live":"off");
+  tg.title = err||"";
+}
+
+function stats(s){
+  $("k-proc").textContent = s.processed.toLocaleString();
+  $("k-remain").textContent = s.remaining.toLocaleString()+" remaining";
+  $("k-tp").textContent = s.tp;
+  $("k-rec").textContent = s.recall==null?" ":"recall "+s.recall.toFixed(3);
+  $("k-fn").textContent = s.fn;
+  $("k-lost").textContent = s.money_lost?eur(s.money_lost)+" lost":" ";
+  $("k-fp").textContent = s.fp;
+  $("k-prec").textContent = s.precision==null?" ":"precision "+s.precision.toFixed(3);
+  const total=s.processed+s.remaining;
+  $("prog").style.width = total?(100*s.processed/total)+"%":"0";
+  $("progress-note").textContent = s.processed
+    ? `${s.processed.toLocaleString()} of ${total.toLocaleString()} · ${eur(s.total_cost)} total cost`
+    : "not started";
+}
+
+function stream(rows){
+  const tb=$("stream");
+  if(streamRows===0) tb.innerHTML="";
+  for(const r of rows.slice().reverse()){
+    const tr=document.createElement("tr");
+    tr.innerHTML=`<td class="num">${r.transaction_id}</td>
+      <td class="r num">${eur2(r.amount)}</td>
+      <td class="r num">${r.probability.toFixed(3)}</td>
+      <td>${r.flagged?'<span class="flag">Flagged</span>':'<span class="pass">Passed</span>'}</td>
+      <td>${r.actual_fraud?'<span class="fraud">Fraud</span>':'<span class="legit">Legitimate</span>'}</td>`;
+    tb.prepend(tr); streamRows++;
+  }
+  while(tb.children.length>60) tb.removeChild(tb.lastChild);
+}
+
+async function alerts(){
+  const a=(await (await fetch("/alerts?limit=20")).json()).alerts;
+  $("alert-count").textContent = a.length?`${a.length} shown`:"0";
+  const box=$("alerts");
+  if(!a.length){ box.innerHTML='<div class="empty">No alerts yet</div>'; return; }
+  box.innerHTML=a.map(x=>`<div class="alert">
+      <div class="top"><span class="amt">${eur2(x.amount)}</span>
+        <span class="p num">p = ${x.probability.toFixed(3)}</span></div>
+      <div class="why">${x.reasons.map(r=>`${r[0]} ${r[1]>0?"+":""}${r[1].toFixed(2)}`).join("   ")||"—"}</div>
+    </div>`).join("");
+}
+
+async function initModelPicker(){
+  const d = await (await fetch("/models")).json();
+  const label = {xgboost:"XGBoost", random_forest:"Random Forest",
+                 logistic_regression:"Logistic Regression", dnn:"Neural network"};
+  const sel = $("modelsel");
+  sel.innerHTML = d.models.map(m => {
+    const live = m.can_serve_live;
+    return `<option value="${m.model}" ${live?"":"disabled"}>` +
+           `${label[m.model]||m.model}${live?"":" (not built)"}</option>`;
+  }).join("");
+  if(d.current) sel.value = d.current;
+  sel.onchange = async () => {
+    sel.disabled = true;
+    const r = await fetch(`/model?name=${sel.value}`, {method:"POST"});
+    if(!r.ok){ alert((await r.json()).detail); }
+    else {
+      $("stream").innerHTML='<tr><td colspan="5" class="empty">Live tail &mdash; press Start or Step to populate</td></tr>';
+      streamRows=0;
+      stats(await (await fetch("/stats")).json());
+      alerts(); health();
+    }
+    sel.disabled = false;
+  };
+}
+
+async function comparison(){
+  const {models} = await (await fetch("/models")).json();
+  const rows = await Promise.all(models.map(async m => {
+    const r = await (await fetch(`/whatif?model=${m.model}&threshold=${m.tuned_threshold}`)).json();
+    return {...r, name:m.model, t:m.tuned_threshold};
+  }));
+  const best = Math.min(...rows.map(r=>r.total_cost));
+  const label = {xgboost:"XGBoost", random_forest:"Random Forest",
+                 logistic_regression:"Logistic Regression", dnn:"Neural network"};
+  $("cmp").innerHTML = rows.sort((a,b)=>a.total_cost-b.total_cost).map(r=>`
+    <tr class="${r.total_cost===best?"best":""}">
+      <td>${label[r.name]||r.name}</td>
+      <td class="r num">${r.t.toFixed(2)}</td>
+      <td class="r num">${r.tp}</td>
+      <td class="r num">${r.fn}</td>
+      <td class="r num">${r.fp}</td>
+      <td class="r num">${r.precision==null?"—":r.precision.toFixed(3)}</td>
+      <td class="r num">${r.recall==null?"—":r.recall.toFixed(3)}</td>
+      <td class="r num">${eur(r.total_cost)}</td>
+    </tr>`).join("");
+}
+
+async function tick(){
+  const r=await (await fetch("/replay/next?n=25")).json();
+  stream(r.scored); stats(r.stats); alerts();
+  if(r.stats.remaining===0) pause();
+}
+function start(){ if(timer) return; $("start").disabled=true; $("pause").disabled=false;
+  timer=setInterval(tick,700); }
+function pause(){ clearInterval(timer); timer=null; $("start").disabled=false; $("pause").disabled=true; }
+async function skipTo(mode,btn){
+  btn.disabled=true;
+  const r=await (await fetch(`/replay/skip_to_fraud?stop_on=${mode}`)).json();
+  stream(r.scored); stats(r.stats); alerts();
+  $("progress-note").textContent=`skipped ${r.skipped.toLocaleString()} · stopped on ${mode==="alert"?"model alert":"confirmed fraud"}`;
+  btn.disabled=false;
+}
+$("start").onclick=start; $("pause").onclick=pause; $("step").onclick=tick;
+$("skip").onclick=()=>skipTo("alert",$("skip"));
+$("skipfraud").onclick=()=>skipTo("fraud",$("skipfraud"));
+$("reset").onclick=async()=>{ pause(); await fetch("/replay/reset",{method:"POST"});
+  $("stream").innerHTML='<tr><td colspan="5" class="empty">Live tail &mdash; press Start or Step to populate</td></tr>';
+  streamRows=0; stats(await (await fetch("/stats")).json()); alerts(); };
+
+// Load current state on open, not only once a tick has run: a page
+// refreshed mid-session was showing an empty alert feed while the counters
+// said otherwise.
+health(); comparison(); alerts(); initModelPicker();
+fetch("/stats").then(r=>r.json()).then(stats);
+setInterval(health, 5000);
+</script>
+</body>
+</html>
