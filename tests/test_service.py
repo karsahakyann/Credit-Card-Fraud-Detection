@@ -124,10 +124,25 @@ def test_both_skip_modes_keep_tallies_exact(client):
 
 
 def test_whatif_reproduces_the_published_result(client):
-    """XGBoost at the Phase 5 threshold must match the committed figures."""
-    r = client.get("/whatif?model=xgboost&threshold=0.11").json()
-    assert r["tp"] == 56 and r["fn"] == 18 and r["fp"] == 10
-    assert abs(r["total_cost"] - 3337) < 1
+    """The service's what-if must agree with the pipeline's own results.
+
+    Expected values are read from threshold_selection.csv rather than
+    hardcoded. The previous version pinned the pre-regularisation numbers
+    (56 / 18 / 10, EUR 3,337), so changing the final model would have broken
+    this test for the wrong reason -- or, worse, been "fixed" by pasting in
+    whatever the service now returned. This checks the property that
+    actually matters: the demo and the analysis compute the same answer.
+    """
+    import pandas as pd
+    from fraud import config
+    from fraud.service import svc
+    sel = pd.read_csv(config.RESULTS_DIR / "threshold_selection.csv")
+    row = sel[(sel.model == "xgboost") & (sel.protocol == svc.protocol)
+              & (sel.review_cost == 10.0)].iloc[0]
+    t = float(row.threshold_selected_on_train)
+    r = client.get(f"/whatif?model=xgboost&threshold={t}").json()
+    assert (r["tp"], r["fp"], r["fn"]) == (int(row.tp), int(row.fp), int(row.fn))
+    assert abs(r["total_cost"] - row.cost_deployed) < 1
 
 
 def test_whatif_rejects_bad_input(client):

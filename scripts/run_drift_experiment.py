@@ -87,14 +87,12 @@ def run_mode(
         elapsed = time.perf_counter() - started
 
         metrics = evaluation.evaluate(est, X_te, y_te)
-        # Only the reference seed is logged to metrics.csv and saved as scores;
-        # the repeat seeds exist to estimate variance, not to be reported rows.
+        # Only the reference seed saves scores; repeat seeds exist to estimate
+        # variance. Results are NOT appended to metrics.csv: its split labels
+        # (drift_<mode>_block<N>) carry no blocking count, so the 6-, 8- and
+        # 12-block runs wrote colliding rows, and every re-run duplicated them.
+        # drift_experiment*.csv is the authoritative, blocking-suffixed record.
         if seed == config.RANDOM_SEED:
-            evaluation.log_result(
-                metrics, model_name="xgboost",
-                split=f"drift_{mode}_block{test_block}",
-                imbalance_strategy="none", notes="phase4 drift",
-            )
             scores = est.predict_proba(X_te)[:, 1]
             experiment.SCORES_DIR.mkdir(parents=True, exist_ok=True)
             np.save(

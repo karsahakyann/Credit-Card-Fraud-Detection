@@ -154,7 +154,8 @@ def main() -> None:
             bc_rows.append({"protocol": protocol, "n_trees": i + 1,
                             "train_pr_auc": tr_curve[i], "heldout_pr_auc": te_curve[i]})
         print(f"  {protocol}:")
-        for n in (50, 100, 200, tuned, 600, 900, 1200):
+        # sorted/deduplicated: the tuned count can coincide with a checkpoint
+        for n in sorted({50, 100, 200, tuned, 600, 900, 1200}):
             n = min(n, len(te_curve))
             mark = "  <- tuned" if n == tuned else ""
             print(f"    {n:>5} trees   train {tr_curve[n-1]:.4f}   "
