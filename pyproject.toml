@@ -10,3 +10,13 @@ requires-python = ">=3.11"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Narrow, named filters only -- anything else must stay visible.
+filterwarnings = [
+    # joblib's pickle loader uses an array-shape setter that NumPy 2.5
+    # deprecated. It fires once per array on load, so a Random Forest artefact
+    # with hundreds of trees emits over a thousand of these. Upstream, harmless,
+    # and it was burying every other warning in the service tests.
+    "ignore:Setting the shape on a NumPy array has been deprecated:DeprecationWarning:joblib",
+]
