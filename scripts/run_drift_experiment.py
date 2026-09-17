@@ -37,7 +37,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import numpy as np
 import pandas as pd
 
-from fraud import config, drift, evaluation, experiment, resampling
+from fraud import config, drift, evaluation, experiment, final_params, resampling
 
 def _out_paths(n_blocks: int) -> tuple[Path, Path, Path]:
     """Headline run (default blocking) writes unsuffixed files; sensitivity
@@ -49,14 +49,10 @@ def _out_paths(n_blocks: int) -> tuple[Path, Path, Path]:
         config.RESULTS_DIR / f"drift_features{tag}.csv",
     )
 
-# Phase 3 winner: xgboost / none / chronological.
-XGB_PARAMS = {
-    "n_estimators": 400,
-    "max_depth": 5,
-    "learning_rate": 0.03,
-    "subsample": 0.8,
-    "colsample_bytree": 0.8,
-}
+# Final (regularised) XGBoost, chronological -- read from the single source
+# of truth rather than hardcoded, so the drift experiment always uses the same
+# model as every other result.
+XGB_PARAMS = final_params.params("xgboost", "chronological")
 
 MODES = ("static", "expanding", "sliding")
 

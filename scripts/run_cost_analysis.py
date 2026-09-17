@@ -34,17 +34,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import numpy as np
 import pandas as pd
 
-from fraud import config, costs, data, experiment
+from fraud import config, costs, data, experiment, final_params
 
 OUT_SUMMARY = config.RESULTS_DIR / "cost_analysis.csv"
 OUT_CURVES = config.RESULTS_DIR / "cost_curves.csv"
 
-SCORE_FILES = {
-    "xgboost": "xgboost_none_{p}.npy",
-    "random_forest": "random_forest_none_{p}.npy",
-    "logistic_regression": "logistic_regression_none_{p}.npy",
-    "dnn": "dnn_{p}.npy",
-}
+
+
+FINAL_MODELS = ("xgboost", "random_forest", "logistic_regression", "dnn")
 
 SPLITTERS = {
     "stratified": data.stratified_split,
@@ -64,8 +61,8 @@ def main() -> None:
         print(f"\n{protocol.upper()} test set: {len(y):,} rows, "
               f"{int(y.sum())} frauds worth EUR {total_fraud_amount:,.0f}")
 
-        for model, pattern in SCORE_FILES.items():
-            path = experiment.SCORES_DIR / pattern.format(p=protocol)
+        for model in FINAL_MODELS:
+            path = final_params.score_file(model, protocol)
             if not path.exists():
                 print(f"  [skip] {path.name} missing")
                 continue

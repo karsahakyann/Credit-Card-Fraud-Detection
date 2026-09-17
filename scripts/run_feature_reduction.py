@@ -25,8 +25,6 @@ Usage: ./venv/bin/python scripts/run_feature_reduction.py
 
 from __future__ import annotations
 
-import ast
-import json
 import sys
 from pathlib import Path
 
@@ -36,7 +34,7 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import average_precision_score
 
-from fraud import config, data, experiment, explain, resampling
+from fraud import config, data, experiment, explain, resampling, final_params
 
 TOP_K = (4, 8, 15, 20, 30)
 SHAP_SAMPLE = 20_000          # training rows explained, for speed
@@ -48,16 +46,8 @@ SPLITTERS = {"stratified": data.stratified_split,
 
 
 def tuned_params(protocol: str) -> dict:
-    grid = pd.read_csv(config.RESULTS_DIR / "imbalance_experiment.csv")
-    row = grid[(grid.model == "xgboost") & (grid.strategy == "none")
-               & (grid.protocol == protocol)].iloc[0]
-    out = {}
-    for k, v in json.loads(row.best_params).items():
-        try:
-            out[k.replace("model__", "")] = ast.literal_eval(v)
-        except (ValueError, SyntaxError):
-            out[k.replace("model__", "")] = v
-    return out
+    """Final (regularised) XGBoost parameters, from the single source of truth."""
+    return final_params.params("xgboost", protocol)
 
 
 def train_side_ranking(X_train, y_train, params, seed=config.RANDOM_SEED):

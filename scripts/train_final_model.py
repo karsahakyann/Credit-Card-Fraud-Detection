@@ -23,8 +23,6 @@ Usage: ./venv/bin/python scripts/train_final_model.py
 
 from __future__ import annotations
 
-import ast
-import json
 import sys
 from pathlib import Path
 
@@ -34,7 +32,7 @@ import joblib
 import numpy as np
 import pandas as pd
 
-from fraud import config, data, evaluation, experiment, resampling
+from fraud import config, data, evaluation, experiment, resampling, final_params
 
 LABELS = {"xgboost": "XGBoost", "random_forest": "Random Forest",
           "logistic_regression": "Logistic Regression", "dnn": "Neural network"}
@@ -57,19 +55,8 @@ OPTIONAL_MODELS = ("dnn",)
 
 
 def tuned_params(protocol: str, model: str = "xgboost") -> dict:
-    if model == "dnn":
-        store = json.loads((config.RESULTS_DIR / "tuned_params.json").read_text())
-        return dict(store["dnn"]["params"])
-    grid = pd.read_csv(config.RESULTS_DIR / "imbalance_experiment.csv")
-    row = grid[(grid.model == model) & (grid.strategy == "none")
-               & (grid.protocol == protocol)].iloc[0]
-    out = {}
-    for k, v in json.loads(row.best_params).items():
-        try:
-            out[k.replace("model__", "")] = ast.literal_eval(v)
-        except (ValueError, SyntaxError):
-            out[k.replace("model__", "")] = v
-    return out
+    """Final parameters, from the single source of truth."""
+    return final_params.params(model, protocol)
 
 
 def deployed_threshold(protocol: str, model: str = "xgboost") -> float:

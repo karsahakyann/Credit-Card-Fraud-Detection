@@ -23,20 +23,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 import numpy as np
 import pandas as pd
 
-from fraud import config, costs, data, experiment
+from fraud import config, costs, data, experiment, final_params
 
 N_BOOT = 500
 REVIEW_COST = 10.0
 OUT = config.RESULTS_DIR / "threshold_gain_bootstrap.csv"
 
+FINAL_MODELS = ("xgboost", "random_forest", "logistic_regression", "dnn")
+
 SPLITTERS = {"stratified": data.stratified_split,
              "chronological": data.chronological_split}
-SCORE_FILES = {
-    "xgboost": "xgboost_none_{p}.npy",
-    "random_forest": "random_forest_none_{p}.npy",
-    "logistic_regression": "logistic_regression_none_{p}.npy",
-    "dnn": "dnn_{p}.npy",
-}
+
 
 
 def main() -> None:
@@ -55,8 +52,8 @@ def main() -> None:
         y = np.asarray(y_test)
         amounts = X_test["Amount"].to_numpy(dtype=float)
 
-        for model, pattern in SCORE_FILES.items():
-            scores = np.load(experiment.SCORES_DIR / pattern.format(p=protocol))
+        for model in FINAL_MODELS:
+            scores = np.load(final_params.score_file(model, protocol))
             t = float(sel[(sel.model == model) & (sel.protocol == protocol)
                           & (sel.review_cost == REVIEW_COST)]
                       .iloc[0].threshold_selected_on_train)

@@ -33,8 +33,6 @@ Usage
 from __future__ import annotations
 
 import argparse
-import ast
-import json
 import sys
 from pathlib import Path
 
@@ -45,7 +43,7 @@ import pandas as pd
 from sklearn.base import clone
 from sklearn.model_selection import StratifiedKFold, TimeSeriesSplit
 
-from fraud import config, costs, data, experiment
+from fraud import config, costs, data, experiment, final_params
 
 OUT_CSV = config.RESULTS_DIR / "threshold_selection.csv"
 OOF_DIR = config.RESULTS_DIR / "oof_scores"
@@ -54,36 +52,12 @@ SPLITTERS = {
     "stratified": data.stratified_split,
     "chronological": data.chronological_split,
 }
-TEST_SCORE_FILES = {
-    "xgboost": "xgboost_none_{p}.npy",
-    "random_forest": "random_forest_none_{p}.npy",
-    "logistic_regression": "logistic_regression_none_{p}.npy",
-    "dnn": "dnn_{p}.npy",
-}
-
-
-def _cast(value: str):
-    """Phase 3 stored params as strings; recover int / float / str."""
-    try:
-        parsed = ast.literal_eval(value)
-        return parsed
-    except (ValueError, SyntaxError):
-        return value
+# Score and OOF paths come from final_params, never from a local table.
 
 
 def tuned_params(model: str, protocol: str) -> dict:
-    """Hyperparameters that produced the saved test scores for this cell."""
-    if model == "dnn":
-        store = json.loads((config.RESULTS_DIR / "tuned_params.json").read_text())
-        return dict(store["dnn"]["params"])
-
-    grid = pd.read_csv(config.RESULTS_DIR / "imbalance_experiment.csv")
-    row = grid[(grid.model == model) & (grid.strategy == "none")
-               & (grid.protocol == protocol)]
-    if row.empty:
-        raise ValueError(f"No Phase 3 params for {model}/{protocol}")
-    raw = json.loads(row.iloc[0].best_params)
-    return {k.replace("model__", ""): _cast(v) for k, v in raw.items()}
+    """Final parameters, from the single source of truth."""
+    return final_params.params(model, protocol)
 
 
 def build_estimator(model: str, params: dict, y_train: np.ndarray):
@@ -142,7 +116,7 @@ def main() -> None:
             X_arr = X_train.to_numpy(dtype=dtype)
             print(f"\n  {model}  params={params}")
 
-            oof_path = OOF_DIR / f"{model}_{protocol}_oof.npy"
+            oof_path = final_params.oof_file(model, protocol)
             if oof_path.exists():
                 oof = np.load(oof_path)
                 print(f"      [cached] {oof_path.name}")
@@ -152,9 +126,20 @@ def main() -> None:
                 np.save(oof_path, oof)
 
             scored = ~np.isnan(oof)
-            test_scores = np.load(
-                experiment.SCORES_DIR / TEST_SCORE_FILES[model].format(p=protocol)
-            )
+
+            # Test scores of the FINAL model. Phase 3's score files came from
+            # the pre-regularisation parameters, so they are regenerated here
+            # by fitting the final model on the full training split.
+            score_path = final_params.score_file(model, protocol)
+            if model == "dnn":
+                test_scores = np.load(score_path)      # not re-tuned
+            else:
+                est = build_estimator(model, params, y_tr)
+                est.fit(X_arr, y_tr)
+                X_test_arr = X_test.to_numpy(dtype=dtype)
+                test_scores = est.predict_proba(X_test_arr)[:, 1]
+                np.save(score_path, test_scores)
+                print(f"      [saved] {score_path.name}")
 
             for rc in costs.REVIEW_COSTS:
                 # 1. threshold chosen on TRAINING out-of-fold scores only
